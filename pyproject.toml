@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rocketmatter-mcp"
+version = "0.1.0"
+description = "MCP server for Rocketmatter API — full coverage for legal practice management"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["rocketmatter", "mcp", "legal", "law", "claude", "practice-management"]
+dependencies = [
+    "mcp>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+rocketmatter-mcp = "rocketmatter_mcp.server:main"
+rocketmatter-mcp-setup = "rocketmatter_mcp.setup.oauth_flow:main"
+rocketmatter-mcp-verify = "rocketmatter_mcp.setup.verify:main"
+
+[project.urls]
+Homepage = "https://github.com/RosenAdvertising/rocketmatter-mcp"
+Issues = "https://github.com/RosenAdvertising/rocketmatter-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rocketmatter_mcp"]

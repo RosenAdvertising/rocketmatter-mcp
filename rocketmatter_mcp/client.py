@@ -66,8 +66,8 @@ class TokenManager:
 
     def grant(self):
         resp = requests.post(f"{AUTH_URL}/GrantToken", json={
-            "UserName": USERNAME,
-            "Password": PASSWORD,
+            "username": USERNAME,
+            "password": PASSWORD,
         })
         if resp.status_code == 200:
             tokens = resp.json()

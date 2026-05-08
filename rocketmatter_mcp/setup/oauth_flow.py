@@ -24,7 +24,8 @@ def prompt(label, default="", secret=False):
 def grant_token(domain, install, username, password):
     base_url = f"{domain.rstrip('/')}/{install}/API_V2"
     url = f"{base_url}/Authentication.svc/json/GrantToken"
-    resp = requests.post(url, json={"UserName": username, "Password": password})
+    # API requires lowercase snake_case keys: username / password
+    resp = requests.post(url, json={"username": username, "password": password})
     if resp.status_code == 200:
         return resp.json()
     raise RuntimeError(f"GrantToken failed ({resp.status_code}): {resp.text}")
@@ -53,9 +54,10 @@ def main():
     try:
         tokens = grant_token(domain, install, username, password)
         tokens["expires_at"] = time.time() + 86400
-        access_token = tokens.get("AccessToken", "")
+        # API returns snake_case: access_token
+        access_token = tokens.get("access_token", "")
         if not access_token:
-            print(f"✗ No AccessToken in response: {tokens}")
+            print(f"✗ No access_token in response: {tokens}")
             sys.exit(1)
         print("✓ Token obtained successfully.")
     except RuntimeError as e:

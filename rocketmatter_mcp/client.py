@@ -54,11 +54,12 @@ class TokenManager:
 
     @property
     def access_token(self):
-        return self.tokens.get("AccessToken", "")
+        # API returns snake_case keys: access_token / refresh_token
+        return self.tokens.get("access_token", "")
 
     @property
     def refresh_token(self):
-        return self.tokens.get("RefreshToken", "")
+        return self.tokens.get("refresh_token", "")
 
     def is_expired(self):
         expires_at = self.tokens.get("expires_at", 0)
@@ -82,7 +83,7 @@ class TokenManager:
         if not self.refresh_token:
             return self.grant()
         resp = requests.post(f"{AUTH_URL}/RefreshToken", json={
-            "RefreshToken": self.refresh_token,
+            "refresh_token": self.refresh_token,
         })
         if resp.status_code == 200:
             tokens = resp.json()
@@ -154,11 +155,11 @@ class RocketMatterClient:
     def save_matter(self, **fields):
         return self._request("Matters.svc/json/Save", fields)
 
-    def search_matters(self, search_term: str, page: int = 1, page_size: int = 50):
+    def search_matters(self, search_term: str, offset: int = 0, fetch: int = 50):
         return self._request("Matters.svc/json/GetMattersBySearch", {
-            "SearchTerm": search_term,
-            "Page": page,
-            "PageSize": page_size,
+            "SearchText": search_term,
+            "Offset": offset,
+            "Fetch": fetch,
         })
 
     def get_matter_billing_info(self, matter_id: int):
@@ -171,17 +172,19 @@ class RocketMatterClient:
         return self._request("Matters.svc/json/GetMatterBudget", {"MatterId": matter_id})
 
     def update_matter_budget(self, matter_id: int, **fields):
-        body = {"MatterId": matter_id, **fields}
-        return self._request("Matters.svc/json/UpdateMatterBudget", body)
+        # API expects {"MatterBudget": {...}} wrapper
+        budget = {"MatterId": matter_id, **fields}
+        return self._request("Matters.svc/json/UpdateMatterBudget", {"MatterBudget": budget})
 
-    def update_matter_status(self, matter_id: int, status_id: int):
+    def update_matter_status(self, matter_id: int, status: str):
+        """status must be one of: Open, Closed, Completed, None, All"""
         return self._request("Matters.svc/json/UpdateMatterStatus", {
             "MatterId": matter_id,
-            "StatusId": status_id,
+            "Status": status,
         })
 
     def delete_matter(self, matter_id: int):
-        return self._request("Matters.svc/json/DeleteMatter", {"ID": matter_id})
+        return self._request("Matters.svc/json/DeleteMatter", {"MatterId": matter_id})
 
     def get_matter_details(self, matter_id: int):
         return self._request("Matters.svc/json/GetDetailsForMatter", {"ID": matter_id})
@@ -201,8 +204,12 @@ class RocketMatterClient:
             "CustomFields": custom_fields,
         })
 
-    def delete_matter_custom_field(self, field_id: int):
-        return self._request("Matters.svc/json/DeleteMatterCustomField", {"ID": field_id})
+    def delete_matter_custom_field(self, matter_id: int, field_names: list):
+        """field_names is a list of custom field name strings to delete."""
+        return self._request("Matters.svc/json/DeleteMatterCustomField", {
+            "MatterId": matter_id,
+            "FieldNames": field_names,
+        })
 
     def get_matter_email_folders(self, matter_id: int):
         return self._request("Matters.svc/json/GetMatterEmailFolders", {"MatterId": matter_id})
@@ -217,7 +224,7 @@ class RocketMatterClient:
         return self._request("Matters.svc/json/SearchCustomFields", {"SearchTerm": search_term})
 
     def get_matter_shared_invoice_settings(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterSharedInvoiceSettings", {"MatterId": matter_id})
+        return self._request("Matters.svc/json/GetMatterSharedInvoiceSettings", {"ID": matter_id})
 
     # ── Matter Types ───────────────────────────────────────────────────────────
 
@@ -239,7 +246,7 @@ class RocketMatterClient:
         return self._request("Clients.svc/json/GetClientByCode", {"Code": code})
 
     def get_clients_by_ids(self, ids: list):
-        return self._request("Clients.svc/json/GetClientsByIds", {"Ids": ids})
+        return self._request("Clients.svc/json/GetClientsByIds", {"ClientIds": ids})
 
     def get_matter_relationships_for_client(self, client_id: int):
         return self._request("Clients.svc/json/GetMatterReadOnlyRelationshipsForClient", {"ClientId": client_id})
@@ -253,13 +260,13 @@ class RocketMatterClient:
     # ── Contacts ───────────────────────────────────────────────────────────────
 
     def get_contact_by_id(self, contact_id: int):
-        return self._request("Contacts.svc/json/GetContactByID", {"ContactId": contact_id})
+        return self._request("Contacts.svc/json/GetContactByID", {"ID": contact_id})
 
     def save_contact(self, **fields):
         return self._request("Contacts.svc/json/Save", fields)
 
     def delete_contact(self, contact_id: int):
-        return self._request("Contacts.svc/json/DeleteContact", {"ContactId": contact_id})
+        return self._request("Contacts.svc/json/DeleteContact", {"Id": contact_id})
 
     def search_contacts(self, search_term: str):
         return self._request("Contacts.svc/json/SearchContacts", {"SearchTerm": search_term})
@@ -282,8 +289,12 @@ class RocketMatterClient:
             "CustomFields": custom_fields,
         })
 
-    def delete_contact_custom_field(self, field_id: int):
-        return self._request("Contacts.svc/json/DeleteContactCustomField", {"ID": field_id})
+    def delete_contact_custom_field(self, contact_id: int, field_names: list):
+        """field_names is a list of custom field name strings to delete."""
+        return self._request("Contacts.svc/json/DeleteContactCustomField", {
+            "ContactId": contact_id,
+            "FieldNames": field_names,
+        })
 
     def get_contacts(self, page: int = 1, page_size: int = 50):
         return self._request("Contacts.svc/json/GetContacts", {"Page": page, "PageSize": page_size})
@@ -311,43 +322,48 @@ class RocketMatterClient:
     # ── Billable Activity ──────────────────────────────────────────────────────
 
     def get_billable_activities(self, matter_id: int):
-        return self._request("BillableActivity.svc/json/GetBillableActivities", {"MatterId": matter_id})
+        # API uses a Filter object wrapper; MatterId goes inside Filter
+        return self._request("BillableActivity.svc/json/GetBillableActivities", {
+            "Filter": {"MatterId": matter_id},
+        })
 
     def save_billable_time(self, matter_id: int, user_id: int, total_seconds: int,
                            notes: str = "", activity_type_id: int = 0, date_and_time: str = ""):
-        body = {
+        # API expects {"BillableTime": {...}} wrapper
+        billable_time = {
             "MatterId": matter_id,
             "UserId": user_id,
             "TotalSeconds": total_seconds,
         }
         if notes:
-            body["Notes"] = notes
+            billable_time["Description"] = notes
         if activity_type_id:
-            body["ActivityTypeId"] = activity_type_id
+            billable_time["ActivityTypeId"] = activity_type_id
         if date_and_time:
-            body["DateAndTime"] = date_and_time
-        return self._request("BillableActivity.svc/json/SaveBillableTime", body)
+            billable_time["BillingDate"] = date_and_time
+        return self._request("BillableActivity.svc/json/SaveBillableTime", {"BillableTime": billable_time})
 
     def save_expense(self, matter_id: int, user_id: int, amount: float,
                      notes: str = "", activity_type_id: int = 0, date_and_time: str = ""):
-        body = {
+        # API expects {"Expense": {...}} wrapper; cost field is "Cost" not "Amount"
+        expense = {
             "MatterId": matter_id,
             "UserId": user_id,
-            "Amount": amount,
+            "Cost": amount,
         }
         if notes:
-            body["Notes"] = notes
+            expense["Description"] = notes
         if activity_type_id:
-            body["ActivityTypeId"] = activity_type_id
+            expense["ActivityTypeId"] = activity_type_id
         if date_and_time:
-            body["DateAndTime"] = date_and_time
-        return self._request("BillableActivity.svc/json/SaveExpense", body)
+            expense["BillingDate"] = date_and_time
+        return self._request("BillableActivity.svc/json/SaveExpense", {"Expense": expense})
 
     def get_time_expense(self, activity_id: int):
-        return self._request("BillableActivity.svc/json/GetTimeExpense", {"ID": activity_id})
+        return self._request("BillableActivity.svc/json/GetTimeExpense", {"ActivityId": activity_id})
 
     def delete_activity(self, activity_id: int):
-        return self._request("BillableActivity.svc/json/DeleteActivity", {"ID": activity_id})
+        return self._request("BillableActivity.svc/json/DeleteActivity", {"ActivityId": activity_id})
 
     def get_activities_for_matter(self, matter_id: int):
         return self._request("BillableActivity.svc/json/GetActivitiesForMatter", {"MatterId": matter_id})
@@ -364,25 +380,43 @@ class RocketMatterClient:
     # ── Timer ──────────────────────────────────────────────────────────────────
 
     def start_timer(self, matter_id: int, user_id: int):
-        return self._request("Timer.svc/json/Start", {"MatterId": matter_id, "UserId": user_id})
+        # API expects ActiveTimer object wrapper
+        return self._request("Timer.svc/json/Start", {
+            "ActiveTimer": {"MatterId": matter_id, "UserId": user_id},
+        })
 
-    def pause_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Pause", {"ID": timer_id})
+    def pause_timer(self, matter_id: int, user_id: int, accumulated_seconds: int = 0):
+        # API expects ActiveTimer object; timer identified by matter+user context
+        return self._request("Timer.svc/json/Pause", {
+            "ActiveTimer": {
+                "MatterId": matter_id,
+                "UserId": user_id,
+                "AccumulatedTime": accumulated_seconds,
+            },
+        })
 
-    def bill_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Bill", {"ID": timer_id})
+    def bill_timer(self, matter_id: int, user_id: int, accumulated_seconds: int = 0):
+        # API expects ActiveTimer object
+        return self._request("Timer.svc/json/Bill", {
+            "ActiveTimer": {
+                "MatterId": matter_id,
+                "UserId": user_id,
+                "AccumulatedTime": accumulated_seconds,
+            },
+        })
 
     def get_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Get", {"ID": timer_id})
+        return self._request("Timer.svc/json/Get", {"Id": timer_id})
 
     def get_all_non_billed_timers(self, user_id: int):
-        return self._request("Timer.svc/json/GetAllNonBilledForUser", {"UserId": user_id})
+        return self._request("Timer.svc/json/GetAllNonBilledForUser", {})
 
     def save_timer(self, **fields):
-        return self._request("Timer.svc/json/Save", fields)
+        # API expects {"ActiveTimer": {...}} wrapper
+        return self._request("Timer.svc/json/Save", {"ActiveTimer": fields})
 
     def delete_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Delete", {"ID": timer_id})
+        return self._request("Timer.svc/json/Delete", {"Id": timer_id})
 
     # ── Invoices ───────────────────────────────────────────────────────────────
 
@@ -396,8 +430,11 @@ class RocketMatterClient:
     def record_payments_to_invoices(self, **fields):
         return self._request("Invoices.svc/json/RecordPaymentsToInvoices", fields)
 
-    def delete_payment(self, payment_id: int):
-        return self._request("Invoices.svc/json/DeletePayment", {"ID": payment_id})
+    def delete_payment(self, ledger_id: int, matter_id: int):
+        return self._request("Invoices.svc/json/DeletePayment", {
+            "LedgerId": ledger_id,
+            "MatterId": matter_id,
+        })
 
     def get_payments_for_matter(self, matter_id: int):
         return self._request("Invoices.svc/json/GetPaymentsForMatter", {"MatterId": matter_id})
@@ -406,7 +443,7 @@ class RocketMatterClient:
         return self._request("Invoices.svc/json/ProcessRefund", fields)
 
     def get_most_recent_invoice_by_client(self, client_id: int):
-        return self._request("Invoices.svc/json/GetMostRecentInvoiceInfoByClient", {"ClientId": client_id})
+        return self._request("Invoices.svc/json/GetMostRecentInvoiceInfoByClient", {"ClientID": client_id})
 
     def save_invoice_template(self, **fields):
         return self._request("Invoices.svc/json/SaveInvoiceTemplate", fields)
@@ -428,27 +465,33 @@ class RocketMatterClient:
     def get_upcoming_events_for_matter(self, matter_id: int):
         return self._request("CalendarEntries.svc/json/GetUpcomingEventsForMatter", {"MatterId": matter_id})
 
-    def get_upcoming_events_for_user(self, user_id: int):
-        return self._request("CalendarEntries.svc/json/GetUpcomingEventsForUser", {"UserId": user_id})
+    def get_upcoming_events_for_user(self, date: str = ""):
+        # API expects {"Date": ...} — user is the authenticated user, not a param
+        body = {}
+        if date:
+            body["Date"] = date
+        return self._request("CalendarEntries.svc/json/GetUpcomingEventsForUser", body)
 
     def save_calendar_entry(self, **fields):
         return self._request("CalendarEntries.svc/json/SaveCalendarEntry", fields)
 
     def get_calendar_entry(self, entry_id: int):
-        return self._request("CalendarEntries.svc/json/GetCalendarEntry", {"ID": entry_id})
+        return self._request("CalendarEntries.svc/json/GetCalendarEntry", {"ActivityId": entry_id})
 
     def delete_calendar_entry(self, entry_id: int):
-        return self._request("CalendarEntries.svc/json/DeleteCalendarEntry", {"ID": entry_id})
+        return self._request("CalendarEntries.svc/json/DeleteCalendarEntry", {"ActivityId": entry_id})
 
     def get_calendar_entries_for_date_range(self, start_date: str, end_date: str, user_id: int = 0):
-        body = {"StartDate": start_date, "EndDate": end_date}
+        # API uses FromDate/ToDate and UserIds (array)
+        body = {"FromDate": start_date, "ToDate": end_date}
         if user_id:
-            body["UserId"] = user_id
+            body["UserIds"] = [user_id]
         return self._request("CalendarEntries.svc/json/GetCalendarEntriesForDateRange", body)
 
     def check_contact_availability(self, contact_id: int, start_date: str, end_date: str):
+        # API uses ContactIds array
         return self._request("CalendarEntries.svc/json/CheckContactAvailability", {
-            "ContactId": contact_id,
+            "ContactIds": [contact_id],
             "StartDate": start_date,
             "EndDate": end_date,
         })
@@ -459,7 +502,7 @@ class RocketMatterClient:
         return self._request("Documents.svc/json/GetDocumentsInPath", {"MatterId": matter_id, "Path": path})
 
     def get_document(self, document_id: int):
-        return self._request("Documents.svc/json/GetDocument", {"ID": document_id})
+        return self._request("Documents.svc/json/GetDocument", {"ActivityId": document_id})
 
     def get_directories(self, matter_id: int):
         return self._request("Documents.svc/json/GetDirectories", {"MatterId": matter_id})
@@ -468,7 +511,7 @@ class RocketMatterClient:
         return self._request("Documents.svc/json/Save", fields)
 
     def delete_document(self, document_id: int):
-        return self._request("Documents.svc/json/DeleteDocument", {"ID": document_id})
+        return self._request("Documents.svc/json/DeleteDocument", {"DocumentId": document_id})
 
     def move_documents_to_folder(self, document_ids: list, folder_path: str, matter_id: int):
         return self._request("Documents.svc/json/MoveDocumentsToFolder", {
@@ -477,15 +520,19 @@ class RocketMatterClient:
             "MatterId": matter_id,
         })
 
-    def rename_folder(self, matter_id: int, old_path: str, new_name: str):
+    def rename_folder(self, document_id: int, new_name: str):
+        # API expects DocumentId (the folder's document ID) and NewName
         return self._request("Documents.svc/json/RenameFolder", {
-            "MatterId": matter_id,
-            "OldPath": old_path,
+            "DocumentId": document_id,
             "NewName": new_name,
         })
 
-    def get_document_download_key(self, document_id: int):
-        return self._request("Documents.svc/json/GetDownloadKey", {"DocumentId": document_id})
+    def get_document_download_key(self, document_id: int, matter_id: int = 0):
+        # API expects MatterId + DocumentId at minimum
+        body = {"DocumentId": document_id}
+        if matter_id:
+            body["MatterId"] = matter_id
+        return self._request("Documents.svc/json/GetDownloadKey", body)
 
     def get_document_versions(self, document_id: int):
         return self._request("Documents.svc/json/GetDocumentVersions", {"DocumentId": document_id})
@@ -497,10 +544,11 @@ class RocketMatterClient:
         return self._request("Documents.svc/json/GetDocumentUploadUrl", fields)
 
     def delete_note(self, note_id: int):
-        return self._request("Documents.svc/json/DeleteNote", {"ID": note_id})
+        return self._request("Documents.svc/json/DeleteNote", {"ActivityId": note_id})
 
-    def get_invoiced_documents(self, matter_id: int):
-        return self._request("Documents.svc/json/GetInvoicedDocuments", {"MatterId": matter_id})
+    def get_invoiced_documents(self, document_id: int):
+        # API expects DocumentId (invoice document ID), not MatterId
+        return self._request("Documents.svc/json/GetInvoicedDocuments", {"DocumentId": document_id})
 
     # ── Document Templates ─────────────────────────────────────────────────────
 
@@ -508,7 +556,7 @@ class RocketMatterClient:
         return self._request("DocumentTemplates.svc/json/GetDocumentTemplates")
 
     def delete_document_template(self, template_id: int):
-        return self._request("DocumentTemplates.svc/json/DeleteDocumentTemplate", {"ID": template_id})
+        return self._request("DocumentTemplates.svc/json/DeleteDocumentTemplate", {"DocumentTemplateId": template_id})
 
     # ── Users ──────────────────────────────────────────────────────────────────
 
@@ -536,8 +584,12 @@ class RocketMatterClient:
     def get_user_preference(self, key: str):
         return self._request("Users.svc/json/GetUserPreference", {"Key": key})
 
-    def get_effective_user_rates(self, user_id: int):
-        return self._request("Users.svc/json/GetEffectiveUserRates", {"UserId": user_id})
+    def get_effective_user_rates(self, billing_date: str = ""):
+        # API expects BillingDate (for current user); UserId is not a request param
+        body = {}
+        if billing_date:
+            body["BillingDate"] = billing_date
+        return self._request("Users.svc/json/GetEffectiveUserRates", body)
 
     # ── Tags ───────────────────────────────────────────────────────────────────
 
@@ -566,13 +618,16 @@ class RocketMatterClient:
     # ── Rates ──────────────────────────────────────────────────────────────────
 
     def get_matter_custom_rates(self, matter_id: int):
-        return self._request("Rates.svc/json/GetMatterCustomRates", {"MatterId": matter_id})
+        # API uses a Filter object
+        return self._request("Rates.svc/json/GetMatterCustomRates", {"Filter": {"MatterId": matter_id}})
 
     def save_custom_rate_config(self, **fields):
-        return self._request("Rates.svc/json/SaveCustomRateConfig", fields)
+        # API expects {"RateConfig": {...}} wrapper
+        return self._request("Rates.svc/json/SaveCustomRateConfig", {"RateConfig": fields})
 
-    def delete_matter_rates(self, matter_id: int):
-        return self._request("Rates.svc/json/DeleteMatterRates", {"MatterId": matter_id})
+    def delete_matter_rates(self, rate_ids: list):
+        # API expects a list of rate IDs, not a matter ID
+        return self._request("Rates.svc/json/DeleteMatterRates", {"RateIds": rate_ids})
 
     # ── Firm Roles ─────────────────────────────────────────────────────────────
 
@@ -583,7 +638,7 @@ class RocketMatterClient:
         return self._request("FirmRoles.svc/json/SaveFirmRole", fields)
 
     def delete_firm_role(self, role_id: int):
-        return self._request("FirmRoles.svc/json/DeleteFirmRole", {"ID": role_id})
+        return self._request("FirmRoles.svc/json/DeleteFirmRole", {"FirmRoleId": role_id})
 
     # ── Tax / Discount / Surcharge / Interest Rates ────────────────────────────
 
@@ -675,7 +730,7 @@ class RocketMatterClient:
     def apply_new_matter_workflow_status(self, matter_id: int, status_id: int):
         return self._request("WorkFlow.svc/json/ApplyNewMatterWorkFlowStatus", {
             "MatterId": matter_id,
-            "StatusId": status_id,
+            "MatterWorkFlowStatusId": status_id,
         })
 
     def add_edit_workflow_status(self, **fields):
@@ -696,18 +751,20 @@ class RocketMatterClient:
     # ── Search ─────────────────────────────────────────────────────────────────
 
     def global_search(self, search_term: str):
-        return self._request("Search.svc/json/GlobalSearch", {"SearchTerm": search_term})
+        return self._request("Search.svc/json/GlobalSearch", {"SearchText": search_term})
 
     def search_occurrence_for_type(self, search_term: str, entity_type: str):
+        # API uses "Search" and "Type" fields
         return self._request("Search.svc/json/SearchOccurenceForType", {
-            "SearchTerm": search_term,
-            "EntityType": entity_type,
+            "Search": search_term,
+            "Type": entity_type,
         })
 
     # ── Recurring Billing ──────────────────────────────────────────────────────
 
     def get_matter_payment_plan(self, matter_id: int):
-        return self._request("RecurringBilling.svc/json/getMatterPaymentPlan", {"MatterId": matter_id})
+        # API uses camelCase "matterID"
+        return self._request("RecurringBilling.svc/json/getMatterPaymentPlan", {"matterID": matter_id})
 
     def generate_payment_plan(self, **fields):
         return self._request("RecurringBilling.svc/json/GeneratePaymentPlan", fields)
@@ -716,7 +773,7 @@ class RocketMatterClient:
         return self._request("RecurringBilling.svc/json/CommitPlan", fields)
 
     def cancel_payment_plan(self, plan_id: int):
-        return self._request("RecurringBilling.svc/json/cancelPaymentPlan", {"PlanId": plan_id})
+        return self._request("RecurringBilling.svc/json/cancelPaymentPlan", {"Id": plan_id})
 
     # ── Matter Templates ───────────────────────────────────────────────────────
 
@@ -747,16 +804,27 @@ class RocketMatterClient:
         })
 
     def delete_matter_court_rule(self, matter_court_rule_id: int):
-        return self._request("CourtRules.svc/json/DeleteMatterCourtRule", {"ID": matter_court_rule_id})
+        return self._request("CourtRules.svc/json/DeleteMatterCourtRule", {"MatterCourtRuleId": matter_court_rule_id})
 
     def get_available_court_rules(self):
         return self._request("CourtRules.svc/json/GetAvailableCourtRules")
 
-    def calculate_deadlines(self, court_rule_id: int, trigger_date: str):
-        return self._request("CourtRules.svc/json/CalculateDeadlines", {
-            "CourtRuleId": court_rule_id,
+    def calculate_deadlines(self, tool_set_id: int, trigger_date: str, matter_id: int = 0,
+                            toggle_id: int = 0, toggle_option_id: int = 0, hearing_note: str = ""):
+        # API uses TriggerID (the toolset), TriggerDate, and optional params
+        body = {
+            "TriggerID": tool_set_id,
             "TriggerDate": trigger_date,
-        })
+        }
+        if matter_id:
+            body["MatterId"] = matter_id
+        if toggle_id:
+            body["ToggleID"] = toggle_id
+        if toggle_option_id:
+            body["ToggleOptionID"] = toggle_option_id
+        if hearing_note:
+            body["HearingNote"] = hearing_note
+        return self._request("CourtRules.svc/json/CalculateDeadlines", body)
 
     # ── Features ───────────────────────────────────────────────────────────────
 

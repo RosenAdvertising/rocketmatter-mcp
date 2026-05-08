@@ -58,9 +58,9 @@ def save_matter(
 
 
 @mcp.tool()
-def search_matters(search_term: str, page: int = 1, page_size: int = 50) -> str:
-    """Search matters by name, client name, or matter number."""
-    return json.dumps(_c().search_matters(search_term, page, page_size), indent=2)
+def search_matters(search_term: str, offset: int = 0, fetch: int = 50) -> str:
+    """Search matters by name, client name, or matter number. Use offset/fetch for pagination."""
+    return json.dumps(_c().search_matters(search_term, offset, fetch), indent=2)
 
 
 @mcp.tool()
@@ -89,9 +89,9 @@ def update_matter_budget(matter_id: int, fields_json: str = "") -> str:
 
 
 @mcp.tool()
-def update_matter_status(matter_id: int, status_id: int) -> str:
-    """Update the status of a matter."""
-    return json.dumps(_c().update_matter_status(matter_id, status_id), indent=2)
+def update_matter_status(matter_id: int, status: str) -> str:
+    """Update the status of a matter. status must be one of: Open, Closed, Completed, None, All."""
+    return json.dumps(_c().update_matter_status(matter_id, status), indent=2)
 
 
 @mcp.tool()
@@ -125,9 +125,10 @@ def get_matter_custom_fields(matter_id: int) -> str:
 
 
 @mcp.tool()
-def delete_matter_custom_field(field_id: int) -> str:
-    """Delete a custom field from a matter."""
-    return json.dumps(_c().delete_matter_custom_field(field_id), indent=2)
+def delete_matter_custom_field(matter_id: int, field_names_csv: str) -> str:
+    """Delete custom fields from a matter. field_names_csv is a comma-separated list of field names."""
+    field_names = [n.strip() for n in field_names_csv.split(",") if n.strip()]
+    return json.dumps(_c().delete_matter_custom_field(matter_id, field_names), indent=2)
 
 
 @mcp.tool()
@@ -291,9 +292,10 @@ def get_contact_custom_fields(contact_id: int) -> str:
 
 
 @mcp.tool()
-def delete_contact_custom_field(field_id: int) -> str:
-    """Delete a custom field from a contact."""
-    return json.dumps(_c().delete_contact_custom_field(field_id), indent=2)
+def delete_contact_custom_field(contact_id: int, field_names_csv: str) -> str:
+    """Delete custom fields from a contact. field_names_csv is a comma-separated list of field names."""
+    field_names = [n.strip() for n in field_names_csv.split(",") if n.strip()]
+    return json.dumps(_c().delete_contact_custom_field(contact_id, field_names), indent=2)
 
 
 @mcp.tool()
@@ -450,15 +452,15 @@ def start_timer(matter_id: int, user_id: int) -> str:
 
 
 @mcp.tool()
-def pause_timer(timer_id: int) -> str:
-    """Pause a running timer."""
-    return json.dumps(_c().pause_timer(timer_id), indent=2)
+def pause_timer(matter_id: int, user_id: int, accumulated_seconds: int = 0) -> str:
+    """Pause a running timer for a matter/user. accumulated_seconds is the total elapsed time so far."""
+    return json.dumps(_c().pause_timer(matter_id, user_id, accumulated_seconds), indent=2)
 
 
 @mcp.tool()
-def bill_timer(timer_id: int) -> str:
+def bill_timer(matter_id: int, user_id: int, accumulated_seconds: int = 0) -> str:
     """Convert a timer into a billable time entry."""
-    return json.dumps(_c().bill_timer(timer_id), indent=2)
+    return json.dumps(_c().bill_timer(matter_id, user_id, accumulated_seconds), indent=2)
 
 
 @mcp.tool()
@@ -468,14 +470,14 @@ def get_timer(timer_id: int) -> str:
 
 
 @mcp.tool()
-def get_all_non_billed_timers(user_id: int) -> str:
-    """Get all unbilled timers for a user."""
-    return json.dumps(_c().get_all_non_billed_timers(user_id), indent=2)
+def get_all_non_billed_timers() -> str:
+    """Get all unbilled timers for the current user."""
+    return json.dumps(_c().get_all_non_billed_timers(0), indent=2)
 
 
 @mcp.tool()
 def save_timer(matter_id: int = 0, user_id: int = 0, fields_json: str = "") -> str:
-    """Create or update a timer entry."""
+    """Create or update a timer entry. fields_json for additional ActiveTimer properties."""
     data = _fields(fields_json)
     if matter_id:
         data["MatterId"] = matter_id
@@ -513,9 +515,9 @@ def record_payments_to_invoices(fields_json: str) -> str:
 
 
 @mcp.tool()
-def delete_payment(payment_id: int) -> str:
-    """Delete a payment record."""
-    return json.dumps(_c().delete_payment(payment_id), indent=2)
+def delete_payment(ledger_id: int, matter_id: int) -> str:
+    """Delete a payment record by its ledger ID and matter ID."""
+    return json.dumps(_c().delete_payment(ledger_id, matter_id), indent=2)
 
 
 @mcp.tool()
@@ -578,9 +580,9 @@ def get_upcoming_events_for_matter(matter_id: int) -> str:
 
 
 @mcp.tool()
-def get_upcoming_events_for_user(user_id: int) -> str:
-    """Get upcoming calendar events for a user."""
-    return json.dumps(_c().get_upcoming_events_for_user(user_id), indent=2)
+def get_upcoming_events_for_user(date: str = "") -> str:
+    """Get upcoming calendar events for the current user. Optionally filter from a specific date (ISO 8601)."""
+    return json.dumps(_c().get_upcoming_events_for_user(date), indent=2)
 
 
 @mcp.tool()
@@ -688,15 +690,15 @@ def move_documents_to_folder(
 
 
 @mcp.tool()
-def rename_folder(matter_id: int, old_path: str, new_name: str) -> str:
-    """Rename a document folder."""
-    return json.dumps(_c().rename_folder(matter_id, old_path, new_name), indent=2)
+def rename_folder(document_id: int, new_name: str) -> str:
+    """Rename a document folder by its document ID."""
+    return json.dumps(_c().rename_folder(document_id, new_name), indent=2)
 
 
 @mcp.tool()
-def get_document_download_key(document_id: int) -> str:
-    """Get a download key/URL for a document."""
-    return json.dumps(_c().get_document_download_key(document_id), indent=2)
+def get_document_download_key(document_id: int, matter_id: int = 0) -> str:
+    """Get a download key/URL for a document. Providing matter_id is recommended."""
+    return json.dumps(_c().get_document_download_key(document_id, matter_id), indent=2)
 
 
 @mcp.tool()
@@ -725,9 +727,9 @@ def delete_note(note_id: int) -> str:
 
 
 @mcp.tool()
-def get_invoiced_documents(matter_id: int) -> str:
-    """Get all invoiced documents for a matter."""
-    return json.dumps(_c().get_invoiced_documents(matter_id), indent=2)
+def get_invoiced_documents(document_id: int) -> str:
+    """Get invoiced document details by document ID."""
+    return json.dumps(_c().get_invoiced_documents(document_id), indent=2)
 
 
 @mcp.tool()
@@ -793,9 +795,9 @@ def get_user_preference(key: str) -> str:
 
 
 @mcp.tool()
-def get_effective_user_rates(user_id: int) -> str:
-    """Get the effective billing rates for a user."""
-    return json.dumps(_c().get_effective_user_rates(user_id), indent=2)
+def get_effective_user_rates(billing_date: str = "") -> str:
+    """Get the effective billing rates for the current user. Optionally pass a billing_date (ISO 8601)."""
+    return json.dumps(_c().get_effective_user_rates(billing_date), indent=2)
 
 
 # ── Tags ───────────────────────────────────────────────────────────────────────
@@ -842,9 +844,10 @@ def save_custom_rate_config(fields_json: str) -> str:
 
 
 @mcp.tool()
-def delete_matter_rates(matter_id: int) -> str:
-    """Delete all custom rates for a matter."""
-    return json.dumps(_c().delete_matter_rates(matter_id), indent=2)
+def delete_matter_rates(rate_ids_csv: str) -> str:
+    """Delete custom rates by their IDs. rate_ids_csv is a comma-separated list of rate IDs."""
+    rate_ids = [int(r.strip()) for r in rate_ids_csv.split(",") if r.strip()]
+    return json.dumps(_c().delete_matter_rates(rate_ids), indent=2)
 
 
 # ── Firm Roles ─────────────────────────────────────────────────────────────────
@@ -1191,9 +1194,19 @@ def get_available_court_rules() -> str:
 
 
 @mcp.tool()
-def calculate_deadlines(court_rule_id: int, trigger_date: str) -> str:
-    """Calculate court deadlines for a rule from a trigger date (ISO 8601)."""
-    return json.dumps(_c().calculate_deadlines(court_rule_id, trigger_date), indent=2)
+def calculate_deadlines(
+    tool_set_id: int,
+    trigger_date: str,
+    matter_id: int = 0,
+    toggle_id: int = 0,
+    toggle_option_id: int = 0,
+    hearing_note: str = "",
+) -> str:
+    """Calculate court deadlines for a court rule tool set from a trigger date (ISO 8601).
+    tool_set_id is the TriggerID/ToolSetId from the available court rules."""
+    return json.dumps(_c().calculate_deadlines(
+        tool_set_id, trigger_date, matter_id, toggle_id, toggle_option_id, hearing_note
+    ), indent=2)
 
 
 # ── Reference Data ─────────────────────────────────────────────────────────────

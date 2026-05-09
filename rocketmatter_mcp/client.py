@@ -34,6 +34,23 @@ BASE_URL = f"{DOMAIN.rstrip('/')}/{INSTALL}/API_V2" if DOMAIN and INSTALL else "
 AUTH_URL = f"{DOMAIN.rstrip('/')}/{INSTALL}/API_V2/Authentication.svc/json" if DOMAIN and INSTALL else ""
 
 
+def _retry_after_seconds(resp, default=10):
+    try:
+        return int(resp.headers.get("Retry-After", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _json_response(resp):
+    try:
+        return resp.json()
+    except ValueError:
+        raise RuntimeError(
+            f"Rocketmatter API returned non-JSON response ({resp.status_code}): "
+            f"{resp.text[:200]}"
+        )
+
+
 class TokenManager:
     def __init__(self):
         self.token_file = CONFIG_DIR / "tokens.json"
@@ -66,12 +83,17 @@ class TokenManager:
         return time.time() >= expires_at - 60
 
     def grant(self):
+        if not DOMAIN or not INSTALL or not USERNAME or not PASSWORD:
+            raise RuntimeError(
+                "ROCKETMATTER_DOMAIN, ROCKETMATTER_INSTALL, ROCKETMATTER_USERNAME, "
+                "and ROCKETMATTER_PASSWORD are required. Run: rocketmatter-mcp-setup"
+            )
         resp = requests.post(f"{AUTH_URL}/GrantToken", json={
             "username": USERNAME,
             "password": PASSWORD,
         })
         if resp.status_code == 200:
-            tokens = resp.json()
+            tokens = _json_response(resp)
             # Rocketmatter tokens typically last 24h; store expires_at
             tokens["expires_at"] = time.time() + 86400
             tokens["fetched_at"] = datetime.now(timezone.utc).isoformat()
@@ -86,7 +108,7 @@ class TokenManager:
             "refresh_token": self.refresh_token,
         })
         if resp.status_code == 200:
-            tokens = resp.json()
+            tokens = _json_response(resp)
             tokens["expires_at"] = time.time() + 86400
             tokens["fetched_at"] = datetime.now(timezone.utc).isoformat()
             self.save(tokens)
@@ -101,6 +123,8 @@ class TokenManager:
 
 class RocketMatterClient:
     def __init__(self):
+        if not BASE_URL or not AUTH_URL:
+            raise RuntimeError("ROCKETMATTER_DOMAIN and ROCKETMATTER_INSTALL are required. Run: rocketmatter-mcp-setup")
         self.tm = TokenManager()
         self.session = requests.Session()
         self._refresh_headers()
@@ -126,7 +150,7 @@ class RocketMatterClient:
             resp = self.session.post(url, json=body or {})
 
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 10))
+            retry_after = _retry_after_seconds(resp)
             print(f"Rate limited. Waiting {retry_after}s...", file=sys.stderr)
             time.sleep(retry_after)
             resp = self.session.post(url, json=body or {})
@@ -137,7 +161,7 @@ class RocketMatterClient:
         if not resp.content:
             return {"success": True}
 
-        return resp.json()
+        return _json_response(resp)
 
     # ── Authentication ─────────────────────────────────────────────────────────
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocketmatter-mcp"
-version = "0.2.0"
-description = "MCP server for Rocketmatter API — full coverage for legal practice management"
+version = "0.3.0"
+description = "MCP server for Rocketmatter — ProfitSolv LCS Integration API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

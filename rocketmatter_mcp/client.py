@@ -1,828 +1,476 @@
 #!/usr/bin/env python3
-"""Rocketmatter API client. OAuth 2.0 bearer token auth, all data calls are POST with JSON body."""
+"""Rocketmatter LCS Integration API client.
+
+Auth:
+  Authorization: ApiKey <ROCKETMATTER_API_KEY>     — all requests
+  X-User-Token: <user access_token>                — NextGen-proxied endpoints
+"""
 
 import json
 import os
-import sys
 import time
 import requests
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".rocketmatter-mcp"
-
 BASE_URL = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
-TOKEN_URL = f"{BASE_URL}/api/ext/auth/token"
-CLIENT_ID = os.environ.get("ROCKETMATTER_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
+API_KEY = os.environ.get("ROCKETMATTER_API_KEY", "")
+USERNAME = os.environ.get("ROCKETMATTER_USERNAME", "")
+PASSWORD = os.environ.get("ROCKETMATTER_PASSWORD", "")
+
+CONFIG_DIR = Path.home() / ".rocketmatter-mcp"
+TOKEN_FILE = CONFIG_DIR / "tokens.json"
 
 
-def _retry_after_seconds(resp, default=10):
-    try:
-        return int(resp.headers.get("Retry-After", default))
-    except (TypeError, ValueError):
-        return default
+def _load_tokens():
+    if TOKEN_FILE.exists():
+        with open(TOKEN_FILE) as f:
+            return json.load(f)
+    return {}
 
 
-def _json_response(resp):
-    try:
-        return resp.json()
-    except ValueError:
+def _save_tokens(tokens: dict):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(tokens, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
+
+
+def _fetch_user_token(session: requests.Session) -> str:
+    if not USERNAME or not PASSWORD:
         raise RuntimeError(
-            f"Rocketmatter API returned non-JSON response ({resp.status_code}): "
-            f"{resp.text[:200]}"
+            "ROCKETMATTER_USERNAME and ROCKETMATTER_PASSWORD must be set. "
+            "Run: rocketmatter-mcp-setup"
         )
+    resp = session.post(f"{BASE_URL}/v1/lookups/user-token", json={
+        "username": USERNAME,
+        "password": PASSWORD,
+    })
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"User token request failed ({resp.status_code}): {resp.text[:200]}"
+        )
+    data = resp.json()
+    token = data.get("access_token", "")
+    if not token:
+        raise RuntimeError(f"No access_token in response: {data}")
+    tokens = {
+        "access_token": token,
+        "expires_at": time.time() + data.get("expires_in", 17999),
+    }
+    _save_tokens(tokens)
+    return token
 
 
-class TokenManager:
+class LCSClient:
     def __init__(self):
-        self.token_file = CONFIG_DIR / "tokens.json"
-        self.tokens = self._load()
+        if not API_KEY:
+            raise RuntimeError("ROCKETMATTER_API_KEY must be set. Run: rocketmatter-mcp-setup")
 
-    def _load(self):
-        if self.token_file.exists():
-            with open(self.token_file) as f:
-                return json.load(f)
-        return {}
-
-    def save(self, tokens):
-        self.tokens = tokens
-        self.token_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.token_file, "w") as f:
-            json.dump(tokens, f, indent=2)
-        os.chmod(self.token_file, 0o600)
-
-    @property
-    def access_token(self):
-        # API returns snake_case keys: access_token / refresh_token
-        return self.tokens.get("access_token", "")
-
-    @property
-    def refresh_token(self):
-        return self.tokens.get("refresh_token", "")
-
-    def is_expired(self):
-        expires_at = self.tokens.get("expires_at", 0)
-        return time.time() >= expires_at - 60
-
-    def refresh(self):
-        if not self.refresh_token:
-            raise RuntimeError("No refresh token found. Run: rocketmatter-mcp-setup")
-        resp = requests.post(TOKEN_URL, data={
-            "grant_type": "refresh_token",
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "refresh_token": self.refresh_token,
-        })
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Token refresh failed ({resp.status_code}). Run: rocketmatter-mcp-setup"
-            )
-        tokens = _json_response(resp)
-        tokens["expires_at"] = time.time() + tokens.get("expires_in", 17999)
-        self.save(tokens)
-        return tokens
-
-    def get_valid_token(self):
-        if not self.access_token:
-            raise RuntimeError("No tokens found. Run: rocketmatter-mcp-setup")
-        if self.is_expired():
-            self.refresh()
-        return self.access_token
-
-
-class RocketMatterClient:
-    def __init__(self):
-        self.tm = TokenManager()
         self.session = requests.Session()
-        self._refresh_headers()
-
-    def _refresh_headers(self):
-        token = self.tm.get_valid_token()
         self.session.headers.update({
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"ApiKey {API_KEY}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        self._user_token = self._get_user_token()
 
-    def _request(self, path, body=None):
-        if self.tm.is_expired():
-            self._refresh_headers()
+    def _get_user_token(self) -> str:
+        tokens = _load_tokens()
+        if tokens.get("access_token") and time.time() < tokens.get("expires_at", 0) - 60:
+            return tokens["access_token"]
+        return _fetch_user_token(self.session)
 
-        url = f"{BASE_URL}/{path.lstrip('/')}"
-        resp = self.session.post(url, json=body or {})
+    def _user_headers(self) -> dict:
+        return {"X-User-Token": self._user_token}
 
+    def _handle(self, resp: requests.Response) -> dict:
         if resp.status_code == 401:
-            self.tm.refresh()
-            self._refresh_headers()
-            resp = self.session.post(url, json=body or {})
-
-        if resp.status_code == 429:
-            retry_after = _retry_after_seconds(resp)
-            print(f"Rate limited. Waiting {retry_after}s...", file=sys.stderr)
-            time.sleep(retry_after)
-            resp = self.session.post(url, json=body or {})
-
+            self._user_token = _fetch_user_token(self.session)
+            return None  # caller retries
         if not resp.ok:
-            raise RuntimeError(f"Rocketmatter API error {resp.status_code}: {resp.text[:400]}")
-
+            raise RuntimeError(f"API error {resp.status_code}: {resp.text[:400]}")
         if not resp.content:
             return {"success": True}
+        return resp.json()
 
-        return _json_response(resp)
+    def _get(self, path: str, params: dict = None, user_token: bool = True) -> dict:
+        headers = self._user_headers() if user_token else {}
+        resp = self.session.get(f"{BASE_URL}{path}", params=params, headers=headers)
+        result = self._handle(resp)
+        if result is None:
+            resp = self.session.get(f"{BASE_URL}{path}", params=params,
+                                    headers=self._user_headers() if user_token else {})
+            return self._handle(resp)
+        return result
 
-    # ── Authentication ─────────────────────────────────────────────────────────
+    def _post(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+        headers = self._user_headers() if user_token else {}
+        resp = self.session.post(f"{BASE_URL}{path}", json=body or {}, headers=headers)
+        result = self._handle(resp)
+        if result is None:
+            resp = self.session.post(f"{BASE_URL}{path}", json=body or {},
+                                     headers=self._user_headers() if user_token else {})
+            return self._handle(resp)
+        return result
 
-    def get_new_refresh_token(self):
-        return self._request("Authentication.svc/json/GetNewRefreshToken")
+    def _put(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+        headers = self._user_headers() if user_token else {}
+        resp = self.session.put(f"{BASE_URL}{path}", json=body or {}, headers=headers)
+        result = self._handle(resp)
+        if result is None:
+            resp = self.session.put(f"{BASE_URL}{path}", json=body or {},
+                                    headers=self._user_headers() if user_token else {})
+            return self._handle(resp)
+        return result
 
-    def logout(self):
-        return self._request("Authentication.svc/json/LogOut")
+    def _patch(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+        headers = self._user_headers() if user_token else {}
+        resp = self.session.patch(f"{BASE_URL}{path}", json=body or {}, headers=headers)
+        result = self._handle(resp)
+        if result is None:
+            resp = self.session.patch(f"{BASE_URL}{path}", json=body or {},
+                                      headers=self._user_headers() if user_token else {})
+            return self._handle(resp)
+        return result
+
+    def _delete(self, path: str, params: dict = None, user_token: bool = True) -> dict:
+        headers = self._user_headers() if user_token else {}
+        resp = self.session.delete(f"{BASE_URL}{path}", params=params, headers=headers)
+        result = self._handle(resp)
+        if result is None:
+            resp = self.session.delete(f"{BASE_URL}{path}", params=params,
+                                       headers=self._user_headers() if user_token else {})
+            return self._handle(resp)
+        return result
 
     # ── Matters ────────────────────────────────────────────────────────────────
 
-    def get_matter(self, matter_id: int):
-        return self._request("Matters.svc/json/Get", {"ID": matter_id})
+    def list_matters(self, page: int = 1, page_size: int = 25, active_only: bool = None,
+                     search_text: str = None, matter_owner_id: int = None) -> dict:
+        params = {"page": page, "pageSize": page_size}
+        if active_only is not None:
+            params["activeOnly"] = active_only
+        if search_text:
+            params["SearchText"] = search_text
+        if matter_owner_id:
+            params["MatterOwnerId"] = matter_owner_id
+        return self._get("/v1/matters", params=params)
 
-    def save_matter(self, **fields):
-        return self._request("Matters.svc/json/Save", fields)
+    def get_matter(self, matter_id: int) -> dict:
+        return self._get(f"/v1/matters/{matter_id}")
 
-    def search_matters(self, search_term: str, offset: int = 0, fetch: int = 50):
-        return self._request("Matters.svc/json/GetMattersBySearch", {
-            "SearchText": search_term,
-            "Offset": offset,
-            "Fetch": fetch,
-        })
+    def create_matter(self, **fields) -> dict:
+        return self._post("/v1/matters", body=fields)
 
-    def get_matter_billing_info(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterBillingInfo", {"ID": matter_id})
+    def update_matter(self, matter_id: int, **fields) -> dict:
+        return self._put(f"/v1/matters/{matter_id}", body=fields)
 
-    def get_matter_budget_info(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterBudgetInfo", {"ID": matter_id})
+    def delete_matter(self, matter_id: int) -> dict:
+        return self._delete(f"/v1/matters/{matter_id}")
 
-    def get_matter_budget(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterBudget", {"MatterId": matter_id})
+    # ── Clients ────────────────────────────────────────────────────────────────
 
-    def update_matter_budget(self, matter_id: int, **fields):
-        # API expects {"MatterBudget": {...}} wrapper
-        budget = {"MatterId": matter_id, **fields}
-        return self._request("Matters.svc/json/UpdateMatterBudget", {"MatterBudget": budget})
+    def list_clients(self, page: int = 1, page_size: int = 25, active_only: bool = None,
+                     display_name: str = None, name: str = None) -> dict:
+        params = {"page": page, "pageSize": page_size}
+        if active_only is not None:
+            params["activeOnly"] = active_only
+        if display_name:
+            params["DisplayName"] = display_name
+        if name:
+            params["Name"] = name
+        return self._get("/v1/clients", params=params)
 
-    def update_matter_status(self, matter_id: int, status: str):
-        """status must be one of: Open, Closed, Completed, None, All"""
-        return self._request("Matters.svc/json/UpdateMatterStatus", {
-            "MatterId": matter_id,
-            "Status": status,
-        })
+    def get_client(self, client_id: int) -> dict:
+        return self._get(f"/v1/clients/{client_id}")
 
-    def delete_matter(self, matter_id: int):
-        return self._request("Matters.svc/json/DeleteMatter", {"MatterId": matter_id})
+    def create_client(self, **fields) -> dict:
+        return self._post("/v1/clients", body=fields)
 
-    def get_matter_details(self, matter_id: int):
-        return self._request("Matters.svc/json/GetDetailsForMatter", {"ID": matter_id})
+    def update_client(self, client_id: int, **fields) -> dict:
+        return self._put(f"/v1/clients/{client_id}", body=fields)
 
-    def get_matter_by_client_matter(self, client_matter: str):
-        return self._request("Matters.svc/json/GetMatterByClientMatter", {"ClientMatter": client_matter})
-
-    def does_client_matter_exist(self, client_matter: str):
-        return self._request("Matters.svc/json/DoesClientMatterExists", {"ClientMatter": client_matter})
-
-    def get_matter_custom_fields(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterCustomFields", {"MatterId": matter_id})
-
-    def save_matter_custom_fields(self, matter_id: int, custom_fields: list):
-        return self._request("Matters.svc/json/SaveMatterCustomFields", {
-            "MatterId": matter_id,
-            "CustomFields": custom_fields,
-        })
-
-    def delete_matter_custom_field(self, matter_id: int, field_names: list):
-        """field_names is a list of custom field name strings to delete."""
-        return self._request("Matters.svc/json/DeleteMatterCustomField", {
-            "MatterId": matter_id,
-            "FieldNames": field_names,
-        })
-
-    def get_matter_email_folders(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterEmailFolders", {"MatterId": matter_id})
-
-    def get_effective_rates_for_matter(self, matter_id: int, date: str):
-        return self._request("Matters.svc/json/GetEffectiveRatesForMatterFromDate", {
-            "MatterId": matter_id,
-            "Date": date,
-        })
-
-    def search_matter_custom_fields(self, search_term: str):
-        return self._request("Matters.svc/json/SearchCustomFields", {"SearchTerm": search_term})
-
-    def get_matter_shared_invoice_settings(self, matter_id: int):
-        return self._request("Matters.svc/json/GetMatterSharedInvoiceSettings", {"ID": matter_id})
-
-    # ── Matter Types ───────────────────────────────────────────────────────────
-
-    def get_matter_types(self):
-        return self._request("MatterTypes.svc/json/Get")
-
-    # ── Clients (Contacts) ─────────────────────────────────────────────────────
-
-    def get_all_clients(self):
-        return self._request("Clients.svc/json/GetAllClients")
-
-    def save_client(self, **fields):
-        return self._request("Clients.svc/json/Save", fields)
-
-    def search_clients(self, search_term: str):
-        return self._request("Clients.svc/json/Search", {"SearchTerm": search_term})
-
-    def get_client_by_code(self, code: str):
-        return self._request("Clients.svc/json/GetClientByCode", {"Code": code})
-
-    def get_clients_by_ids(self, ids: list):
-        return self._request("Clients.svc/json/GetClientsByIds", {"ClientIds": ids})
-
-    def get_matter_relationships_for_client(self, client_id: int):
-        return self._request("Clients.svc/json/GetMatterReadOnlyRelationshipsForClient", {"ClientId": client_id})
-
-    def get_countries(self):
-        return self._request("Clients.svc/json/GetCountries")
-
-    def create_client_from_string(self, client_string: str):
-        return self._request("Clients.svc/json/CreateClientFromString", {"ClientString": client_string})
+    def delete_client(self, client_id: int) -> dict:
+        return self._delete(f"/v1/clients/{client_id}")
 
     # ── Contacts ───────────────────────────────────────────────────────────────
 
-    def get_contact_by_id(self, contact_id: int):
-        return self._request("Contacts.svc/json/GetContactByID", {"ID": contact_id})
+    def list_contacts(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/contacts", params={"page": page, "pageSize": page_size})
 
-    def save_contact(self, **fields):
-        return self._request("Contacts.svc/json/Save", fields)
+    def get_contact(self, contact_id: int) -> dict:
+        return self._get(f"/v1/contacts/{contact_id}")
 
-    def delete_contact(self, contact_id: int):
-        return self._request("Contacts.svc/json/DeleteContact", {"Id": contact_id})
+    def create_contact(self, **fields) -> dict:
+        return self._post("/v1/contacts", body=fields)
 
-    def search_contacts(self, search_term: str):
-        return self._request("Contacts.svc/json/SearchContacts", {"SearchTerm": search_term})
+    def update_contact(self, contact_id: int, **fields) -> dict:
+        return self._put(f"/v1/contacts/{contact_id}", body=fields)
 
-    def search_person_contacts(self, search_term: str):
-        return self._request("Contacts.svc/json/SearchPersonContacts", {"SearchTerm": search_term})
+    def delete_contact(self, contact_id: int) -> dict:
+        return self._delete(f"/v1/contacts/{contact_id}")
 
-    def get_person_contacts(self):
-        return self._request("Contacts.svc/json/GetPersonContacts")
+    # ── Time Entries ───────────────────────────────────────────────────────────
 
-    def get_contact_data(self, contact_id: int):
-        return self._request("Contacts.svc/json/GetContactData", {"ContactId": contact_id})
+    def list_time_entries(self, matter_id: int = None, rate_type: str = None,
+                          billing_status: str = None, card_status: str = None,
+                          page: int = 1, page_size: int = 25) -> dict:
+        params = {"page": page, "pageSize": page_size}
+        if matter_id:
+            params["MatterId"] = matter_id
+        if rate_type:
+            params["RateType"] = rate_type
+        if billing_status:
+            params["BillingStatus"] = billing_status
+        if card_status:
+            params["CardStatus"] = card_status
+        return self._get("/v1/time-entries", params=params)
 
-    def get_contact_custom_fields(self, contact_id: int):
-        return self._request("Contacts.svc/json/GetContactCustomFields", {"ContactId": contact_id})
+    def get_time_entry(self, time_entry_id: int) -> dict:
+        return self._get(f"/v1/time-entries/{time_entry_id}")
 
-    def save_contact_custom_fields(self, contact_id: int, custom_fields: list):
-        return self._request("Contacts.svc/json/SaveContactCustomFields", {
-            "ContactId": contact_id,
-            "CustomFields": custom_fields,
-        })
+    def create_time_entry(self, **fields) -> dict:
+        return self._post("/v1/time-entries", body=fields)
 
-    def delete_contact_custom_field(self, contact_id: int, field_names: list):
-        """field_names is a list of custom field name strings to delete."""
-        return self._request("Contacts.svc/json/DeleteContactCustomField", {
-            "ContactId": contact_id,
-            "FieldNames": field_names,
-        })
+    def update_time_entry(self, time_entry_id: int, **fields) -> dict:
+        return self._put(f"/v1/time-entries/{time_entry_id}", body=fields)
 
-    def get_contacts(self, page: int = 1, page_size: int = 50):
-        return self._request("Contacts.svc/json/GetContacts", {"Page": page, "PageSize": page_size})
+    def delete_time_entry(self, time_entry_id: int) -> dict:
+        return self._delete(f"/v1/time-entries/{time_entry_id}")
 
-    # ── Tasks ──────────────────────────────────────────────────────────────────
+    # ── Expenses ───────────────────────────────────────────────────────────────
 
-    def get_tasks_for_matter(self, matter_id: int):
-        return self._request("Tasks.svc/json/GetTasksForMatter", {"MatterId": matter_id})
+    def list_expenses(self, billing_type_id: int = None, billing_status_id: int = None,
+                      page: int = 1, page_size: int = 25) -> dict:
+        params = {"page": page, "pageSize": page_size}
+        if billing_type_id:
+            params["BillingTypeId"] = billing_type_id
+        if billing_status_id:
+            params["BillingStatusId"] = billing_status_id
+        return self._get("/v1/expense", params=params)
 
-    def get_tasks_by_filter(self, **filters):
-        return self._request("Tasks.svc/json/GetTasksByFilter", filters)
+    def get_expense(self, expense_id: int) -> dict:
+        return self._get(f"/v1/expense/{expense_id}")
 
-    def get_task_by_activity_id(self, activity_id: int):
-        return self._request("Tasks.svc/json/GetTaskByActivityId", {"ActivityId": activity_id})
+    def create_expense(self, **fields) -> dict:
+        return self._post("/v1/expense", body=fields)
 
-    def save_task(self, **fields):
-        return self._request("Tasks.svc/json/Save", fields)
+    def update_expense(self, expense_id: int, **fields) -> dict:
+        return self._put(f"/v1/expense/{expense_id}", body=fields)
 
-    def delete_task(self, task_id: int):
-        return self._request("Tasks.svc/json/Delete", {"ID": task_id})
-
-    def get_common_tags(self):
-        return self._request("Tasks.svc/json/GetCommonTags")
-
-    # ── Billable Activity ──────────────────────────────────────────────────────
-
-    def get_billable_activities(self, matter_id: int):
-        # API uses a Filter object wrapper; MatterId goes inside Filter
-        return self._request("BillableActivity.svc/json/GetBillableActivities", {
-            "Filter": {"MatterId": matter_id},
-        })
-
-    def save_billable_time(self, matter_id: int, user_id: int, total_seconds: int,
-                           notes: str = "", activity_type_id: int = 0, date_and_time: str = ""):
-        # API expects {"BillableTime": {...}} wrapper
-        billable_time = {
-            "MatterId": matter_id,
-            "UserId": user_id,
-            "TotalSeconds": total_seconds,
-        }
-        if notes:
-            billable_time["Description"] = notes
-        if activity_type_id:
-            billable_time["ActivityTypeId"] = activity_type_id
-        if date_and_time:
-            billable_time["BillingDate"] = date_and_time
-        return self._request("BillableActivity.svc/json/SaveBillableTime", {"BillableTime": billable_time})
-
-    def save_expense(self, matter_id: int, user_id: int, amount: float,
-                     notes: str = "", activity_type_id: int = 0, date_and_time: str = ""):
-        # API expects {"Expense": {...}} wrapper; cost field is "Cost" not "Amount"
-        expense = {
-            "MatterId": matter_id,
-            "UserId": user_id,
-            "Cost": amount,
-        }
-        if notes:
-            expense["Description"] = notes
-        if activity_type_id:
-            expense["ActivityTypeId"] = activity_type_id
-        if date_and_time:
-            expense["BillingDate"] = date_and_time
-        return self._request("BillableActivity.svc/json/SaveExpense", {"Expense": expense})
-
-    def get_time_expense(self, activity_id: int):
-        return self._request("BillableActivity.svc/json/GetTimeExpense", {"ActivityId": activity_id})
-
-    def delete_activity(self, activity_id: int):
-        return self._request("BillableActivity.svc/json/DeleteActivity", {"ActivityId": activity_id})
-
-    def get_activities_for_matter(self, matter_id: int):
-        return self._request("BillableActivity.svc/json/GetActivitiesForMatter", {"MatterId": matter_id})
-
-    def get_firm_balances(self):
-        return self._request("BillableActivity.svc/json/GetFirmBalances")
-
-    def get_activity_type_id(self, name: str):
-        return self._request("BillableActivity.svc/json/GetActivityTypeId", {"Name": name})
-
-    def get_all_ledes(self):
-        return self._request("BillableActivity.svc/json/GetAllLedes")
-
-    # ── Timer ──────────────────────────────────────────────────────────────────
-
-    def start_timer(self, matter_id: int, user_id: int):
-        # API expects ActiveTimer object wrapper
-        return self._request("Timer.svc/json/Start", {
-            "ActiveTimer": {"MatterId": matter_id, "UserId": user_id},
-        })
-
-    def pause_timer(self, matter_id: int, user_id: int, accumulated_seconds: int = 0):
-        # API expects ActiveTimer object; timer identified by matter+user context
-        return self._request("Timer.svc/json/Pause", {
-            "ActiveTimer": {
-                "MatterId": matter_id,
-                "UserId": user_id,
-                "AccumulatedTime": accumulated_seconds,
-            },
-        })
-
-    def bill_timer(self, matter_id: int, user_id: int, accumulated_seconds: int = 0):
-        # API expects ActiveTimer object
-        return self._request("Timer.svc/json/Bill", {
-            "ActiveTimer": {
-                "MatterId": matter_id,
-                "UserId": user_id,
-                "AccumulatedTime": accumulated_seconds,
-            },
-        })
-
-    def get_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Get", {"Id": timer_id})
-
-    def get_all_non_billed_timers(self, user_id: int):
-        return self._request("Timer.svc/json/GetAllNonBilledForUser", {})
-
-    def save_timer(self, **fields):
-        # API expects {"ActiveTimer": {...}} wrapper
-        return self._request("Timer.svc/json/Save", {"ActiveTimer": fields})
-
-    def delete_timer(self, timer_id: int):
-        return self._request("Timer.svc/json/Delete", {"Id": timer_id})
+    def delete_expense(self, expense_id: int) -> dict:
+        return self._delete(f"/v1/expense/{expense_id}")
 
     # ── Invoices ───────────────────────────────────────────────────────────────
 
-    def run_invoice(self, matter_id: int, **fields):
-        body = {"MatterId": matter_id, **fields}
-        return self._request("Invoices.svc/json/RunInvoice", body)
+    def list_invoices(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/invoices", params={"page": page, "pageSize": page_size})
 
-    def get_invoice_payments_for_matter(self, matter_id: int):
-        return self._request("Invoices.svc/json/GetInvoicePaymentsForMatter", {"MatterId": matter_id})
+    def get_invoice(self, invoice_id: int) -> dict:
+        return self._get(f"/v1/invoices/{invoice_id}")
 
-    def record_payments_to_invoices(self, **fields):
-        return self._request("Invoices.svc/json/RecordPaymentsToInvoices", fields)
+    def create_invoice(self, **fields) -> dict:
+        return self._post("/v1/invoices", body=fields)
 
-    def delete_payment(self, ledger_id: int, matter_id: int):
-        return self._request("Invoices.svc/json/DeletePayment", {
-            "LedgerId": ledger_id,
-            "MatterId": matter_id,
-        })
+    def update_invoice(self, invoice_id: int, **fields) -> dict:
+        return self._patch(f"/v1/invoices/{invoice_id}", body=fields)
 
-    def get_payments_for_matter(self, matter_id: int):
-        return self._request("Invoices.svc/json/GetPaymentsForMatter", {"MatterId": matter_id})
+    def delete_invoice(self, invoice_id: int) -> dict:
+        return self._delete(f"/v1/invoices/{invoice_id}")
 
-    def process_refund(self, **fields):
-        return self._request("Invoices.svc/json/ProcessRefund", fields)
+    def approve_invoice(self, invoice_id: int, invoice_number: str) -> dict:
+        return self._post(f"/v1/invoices/{invoice_id}/approve",
+                          body={"invoiceNumber": invoice_number})
 
-    def get_most_recent_invoice_by_client(self, client_id: int):
-        return self._request("Invoices.svc/json/GetMostRecentInvoiceInfoByClient", {"ClientID": client_id})
+    # ── Payments ───────────────────────────────────────────────────────────────
 
-    def save_invoice_template(self, **fields):
-        return self._request("Invoices.svc/json/SaveInvoiceTemplate", fields)
+    def list_payments(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/payments", params={"page": page, "pageSize": page_size})
 
-    def get_available_invoice_templates(self):
-        return self._request("Invoices.svc/json/getAvailableInvoiceTemplates")
+    def create_payment(self, **fields) -> dict:
+        return self._post("/v1/payments", body=fields)
 
-    def delete_invoice_template(self, template_id: int):
-        return self._request("Invoices.svc/json/deleteInvoiceTemplate", {"ID": template_id})
+    def get_invoice_allocations(self, **params) -> dict:
+        return self._get("/v1/payments/invoice-allocations", params=params)
 
-    def save_retainer_request(self, **fields):
-        return self._request("Invoices.svc/json/SaveRetainerRequest", fields)
+    # ── Transactions ───────────────────────────────────────────────────────────
 
-    def get_transaction_info(self, transaction_id: int):
-        return self._request("Invoices.svc/json/GetTransactionInfo", {"ID": transaction_id})
+    def list_transactions(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/transactions", params={"page": page, "pageSize": page_size})
 
-    # ── Calendar ───────────────────────────────────────────────────────────────
+    def get_transaction(self, transaction_id: int) -> dict:
+        return self._get(f"/v1/transactions/{transaction_id}")
 
-    def get_upcoming_events_for_matter(self, matter_id: int):
-        return self._request("CalendarEntries.svc/json/GetUpcomingEventsForMatter", {"MatterId": matter_id})
+    def create_transaction(self, **fields) -> dict:
+        return self._post("/v1/transactions", body=fields)
 
-    def get_upcoming_events_for_user(self, date: str = ""):
-        # API expects {"Date": ...} — user is the authenticated user, not a param
-        body = {}
-        if date:
-            body["Date"] = date
-        return self._request("CalendarEntries.svc/json/GetUpcomingEventsForUser", body)
+    def update_transaction(self, transaction_id: int, **fields) -> dict:
+        return self._put(f"/v1/transactions/{transaction_id}", body=fields)
 
-    def save_calendar_entry(self, **fields):
-        return self._request("CalendarEntries.svc/json/SaveCalendarEntry", fields)
-
-    def get_calendar_entry(self, entry_id: int):
-        return self._request("CalendarEntries.svc/json/GetCalendarEntry", {"ActivityId": entry_id})
-
-    def delete_calendar_entry(self, entry_id: int):
-        return self._request("CalendarEntries.svc/json/DeleteCalendarEntry", {"ActivityId": entry_id})
-
-    def get_calendar_entries_for_date_range(self, start_date: str, end_date: str, user_id: int = 0):
-        # API uses FromDate/ToDate and UserIds (array)
-        body = {"FromDate": start_date, "ToDate": end_date}
-        if user_id:
-            body["UserIds"] = [user_id]
-        return self._request("CalendarEntries.svc/json/GetCalendarEntriesForDateRange", body)
-
-    def check_contact_availability(self, contact_id: int, start_date: str, end_date: str):
-        # API uses ContactIds array
-        return self._request("CalendarEntries.svc/json/CheckContactAvailability", {
-            "ContactIds": [contact_id],
-            "StartDate": start_date,
-            "EndDate": end_date,
-        })
+    def delete_transaction(self, transaction_id: int) -> dict:
+        return self._delete(f"/v1/transactions/{transaction_id}")
 
     # ── Documents ──────────────────────────────────────────────────────────────
 
-    def get_documents_in_path(self, matter_id: int, path: str = ""):
-        return self._request("Documents.svc/json/GetDocumentsInPath", {"MatterId": matter_id, "Path": path})
-
-    def get_document(self, document_id: int):
-        return self._request("Documents.svc/json/GetDocument", {"ActivityId": document_id})
-
-    def get_directories(self, matter_id: int):
-        return self._request("Documents.svc/json/GetDirectories", {"MatterId": matter_id})
-
-    def save_document(self, **fields):
-        return self._request("Documents.svc/json/Save", fields)
-
-    def delete_document(self, document_id: int):
-        return self._request("Documents.svc/json/DeleteDocument", {"DocumentId": document_id})
-
-    def move_documents_to_folder(self, document_ids: list, folder_path: str, matter_id: int):
-        return self._request("Documents.svc/json/MoveDocumentsToFolder", {
-            "DocumentIds": document_ids,
-            "FolderPath": folder_path,
-            "MatterId": matter_id,
-        })
-
-    def rename_folder(self, document_id: int, new_name: str):
-        # API expects DocumentId (the folder's document ID) and NewName
-        return self._request("Documents.svc/json/RenameFolder", {
-            "DocumentId": document_id,
-            "NewName": new_name,
-        })
-
-    def get_document_download_key(self, document_id: int, matter_id: int = 0):
-        # API expects MatterId + DocumentId at minimum
-        body = {"DocumentId": document_id}
+    def list_documents(self, matter_id: int = None, path: str = None,
+                       doc_id: str = None) -> dict:
+        params = {}
         if matter_id:
-            body["MatterId"] = matter_id
-        return self._request("Documents.svc/json/GetDownloadKey", body)
+            params["matterId"] = matter_id
+        if path:
+            params["path"] = path
+        if doc_id:
+            params["id"] = doc_id
+        return self._get("/v1/documents", params=params)
 
-    def get_document_versions(self, document_id: int):
-        return self._request("Documents.svc/json/GetDocumentVersions", {"DocumentId": document_id})
+    def get_document_default_app(self) -> dict:
+        return self._get("/v1/documents/defaultApplication")
 
-    def get_document_file_info(self, document_id: int):
-        return self._request("Documents.svc/json/GetDocumentFileInfo", {"DocumentId": document_id})
+    def get_document_download_url(self, **fields) -> dict:
+        return self._post("/v1/documents/download-url", body=fields)
 
-    def get_document_upload_url(self, **fields):
-        return self._request("Documents.svc/json/GetDocumentUploadUrl", fields)
+    def get_document_upload_url(self, **fields) -> dict:
+        return self._post("/v1/documents/upload-url", body=fields)
 
-    def delete_note(self, note_id: int):
-        return self._request("Documents.svc/json/DeleteNote", {"ActivityId": note_id})
+    def delete_document(self, path: str, doc_id: str) -> dict:
+        return self._delete("/v1/documents/delete", params={"path": path, "id": doc_id})
 
-    def get_invoiced_documents(self, document_id: int):
-        # API expects DocumentId (invoice document ID), not MatterId
-        return self._request("Documents.svc/json/GetInvoicedDocuments", {"DocumentId": document_id})
+    # ── Users / Timekeepers ────────────────────────────────────────────────────
 
-    # ── Document Templates ─────────────────────────────────────────────────────
+    def list_users(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/users", params={"page": page, "pageSize": page_size})
 
-    def get_document_templates(self):
-        return self._request("DocumentTemplates.svc/json/GetDocumentTemplates")
+    def get_user(self, user_id: int) -> dict:
+        return self._get(f"/v1/users/{user_id}")
 
-    def delete_document_template(self, template_id: int):
-        return self._request("DocumentTemplates.svc/json/DeleteDocumentTemplate", {"DocumentTemplateId": template_id})
+    # ── Text Shortcuts ─────────────────────────────────────────────────────────
 
-    # ── Users ──────────────────────────────────────────────────────────────────
+    def list_text_shortcuts(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/text-shortcuts",
+                         params={"page": page, "pageSize": page_size})
 
-    def get_current_user(self):
-        return self._request("Users.svc/json/GetCurrentUser")
+    def get_text_shortcut(self, shortcut_id: int) -> dict:
+        return self._get(f"/v1/text-shortcuts/{shortcut_id}")
 
-    def get_user(self, user_id: int):
-        return self._request("Users.svc/json/Get", {"ID": user_id})
+    # ── Codes ──────────────────────────────────────────────────────────────────
 
-    def search_users(self, search_term: str):
-        return self._request("Users.svc/json/Search", {"SearchTerm": search_term})
+    def get_codes(self, matter_id: int) -> dict:
+        return self._get("/v1/codes", params={"matterId": matter_id}, user_token=False)
 
-    def get_active_users(self):
-        return self._request("Users.svc/json/GetActiveUsers")
+    def get_task_codes(self, matter_id: int) -> dict:
+        return self._get("/v1/codes/tasks", params={"matterId": matter_id}, user_token=False)
 
-    def get_user_by_initials(self, initials: str):
-        return self._request("Users.svc/json/GetByInitials", {"Initials": initials})
+    def get_activity_codes(self, matter_id: int) -> dict:
+        return self._get("/v1/codes/activities", params={"matterId": matter_id}, user_token=False)
 
-    def get_user_by_full_name(self, full_name: str):
-        return self._request("Users.svc/json/GetByFullName", {"FullName": full_name})
+    # ── Lookups ────────────────────────────────────────────────────────────────
 
-    def set_user_preference(self, key: str, value: str):
-        return self._request("Users.svc/json/SetUserPreference", {"Key": key, "Value": value})
+    def get_new_matter_defaults(self) -> dict:
+        return self._get("/v1/lookups/new-matter/definition/defaults")
 
-    def get_user_preference(self, key: str):
-        return self._request("Users.svc/json/GetUserPreference", {"Key": key})
-
-    def get_effective_user_rates(self, billing_date: str = ""):
-        # API expects BillingDate (for current user); UserId is not a request param
-        body = {}
-        if billing_date:
-            body["BillingDate"] = billing_date
-        return self._request("Users.svc/json/GetEffectiveUserRates", body)
-
-    # ── Tags ───────────────────────────────────────────────────────────────────
-
-    def search_tags(self, search_term: str):
-        return self._request("Tags.svc/json/Search", {"SearchTerm": search_term})
-
-    def add_tag(self, entity_id: int, entity_type: str, tag: str):
-        return self._request("Tags.svc/json/AddTag", {
-            "EntityId": entity_id,
-            "EntityType": entity_type,
-            "Tag": tag,
-        })
-
-    def remove_tag(self, entity_id: int, entity_type: str, tag: str):
-        return self._request("Tags.svc/json/RemoveTag", {
-            "EntityId": entity_id,
-            "EntityType": entity_type,
-            "Tag": tag,
-        })
-
-    # ── Trust ──────────────────────────────────────────────────────────────────
-
-    def get_trust_details_for_matter(self, matter_id: int):
-        return self._request("Trust.svc/json/TrustDetailsForMatter", {"MatterId": matter_id})
-
-    # ── Rates ──────────────────────────────────────────────────────────────────
-
-    def get_matter_custom_rates(self, matter_id: int):
-        # API uses a Filter object
-        return self._request("Rates.svc/json/GetMatterCustomRates", {"Filter": {"MatterId": matter_id}})
-
-    def save_custom_rate_config(self, **fields):
-        # API expects {"RateConfig": {...}} wrapper
-        return self._request("Rates.svc/json/SaveCustomRateConfig", {"RateConfig": fields})
-
-    def delete_matter_rates(self, rate_ids: list):
-        # API expects a list of rate IDs, not a matter ID
-        return self._request("Rates.svc/json/DeleteMatterRates", {"RateIds": rate_ids})
-
-    # ── Firm Roles ─────────────────────────────────────────────────────────────
-
-    def get_firm_roles(self):
-        return self._request("FirmRoles.svc/json/GetFirmRoles")
-
-    def save_firm_role(self, **fields):
-        return self._request("FirmRoles.svc/json/SaveFirmRole", fields)
-
-    def delete_firm_role(self, role_id: int):
-        return self._request("FirmRoles.svc/json/DeleteFirmRole", {"FirmRoleId": role_id})
-
-    # ── Tax / Discount / Surcharge / Interest Rates ────────────────────────────
-
-    def get_all_tax_rates(self):
-        return self._request("TaxRates.svc/json/GetAll")
-
-    def save_tax_rate(self, **fields):
-        return self._request("TaxRates.svc/json/Save", fields)
-
-    def delete_tax_rate(self, rate_id: int):
-        return self._request("TaxRates.svc/json/Delete", {"ID": rate_id})
-
-    def get_all_discounts(self):
-        return self._request("Discounts.svc/json/GetAll")
-
-    def save_discount(self, **fields):
-        return self._request("Discounts.svc/json/Save", fields)
-
-    def get_all_interests(self):
-        return self._request("Interests.svc/json/GetAll")
-
-    def save_interest(self, **fields):
-        return self._request("Interests.svc/json/Save", fields)
-
-    def charge_interest_fees(self, matter_id: int):
-        return self._request("Interests.svc/json/ChargeInterestFees", {"MatterId": matter_id})
-
-    def get_all_surcharge_rates(self):
-        return self._request("SurchargeRates.svc/json/GetAll")
-
-    def save_surcharge_rate(self, **fields):
-        return self._request("SurchargeRates.svc/json/Save", fields)
-
-    def delete_surcharge_rate(self, rate_id: int):
-        return self._request("SurchargeRates.svc/json/Delete", {"ID": rate_id})
-
-    # ── Messages (Phone) ───────────────────────────────────────────────────────
-
-    def save_phone_message(self, matter_id: int, contact_id: int, message: str, **fields):
-        body = {"MatterId": matter_id, "ContactId": contact_id, "Message": message, **fields}
-        return self._request("Messages.svc/json/SavePhoneMessage", body)
-
-    def get_phone_message(self, message_id: int):
-        return self._request("Messages.svc/json/GetPhoneMessage", {"ID": message_id})
-
-    # ── Communicator (Internal Messaging) ──────────────────────────────────────
-
-    def get_channels_i_belong_to(self):
-        return self._request("Communicator.svc/json/GetChannelsIBelongTo")
-
-    def send_direct_message(self, to_user_id: int, message: str):
-        return self._request("Communicator.svc/json/SendDirectMessage", {
-            "ToUserId": to_user_id,
-            "Message": message,
-        })
-
-    def send_channel_message(self, channel_id: int, message: str):
-        return self._request("Communicator.svc/json/SendChannelMessage", {
-            "ChannelId": channel_id,
-            "Message": message,
-        })
-
-    def get_direct_chat(self, user_id: int):
-        return self._request("Communicator.svc/json/GetDirectChat", {"UserId": user_id})
-
-    def get_channel_chat(self, channel_id: int):
-        return self._request("Communicator.svc/json/GetChannelChat", {"ChannelId": channel_id})
-
-    def get_unread_direct_messages(self):
-        return self._request("Communicator.svc/json/GetUnreadDirectMessages")
-
-    def get_unread_channel_messages(self):
-        return self._request("Communicator.svc/json/GetUnreadChannelMessages")
-
-    def save_channel(self, **fields):
-        return self._request("Communicator.svc/json/SaveChannel", fields)
-
-    def delete_channel(self, channel_id: int):
-        return self._request("Communicator.svc/json/DeleteChannel", {"ChannelId": channel_id})
-
-    # ── Workflow ───────────────────────────────────────────────────────────────
-
-    def get_matter_current_workflow_status(self, matter_id: int):
-        return self._request("WorkFlow.svc/json/GetMatterCurrentWorkFlowStatus", {"MatterId": matter_id})
-
-    def get_matter_workflow_statuses(self, matter_id: int):
-        return self._request("WorkFlow.svc/json/GetMatterWorkFLowStatuses", {"MatterId": matter_id})
-
-    def apply_new_matter_workflow_status(self, matter_id: int, status_id: int):
-        return self._request("WorkFlow.svc/json/ApplyNewMatterWorkFlowStatus", {
-            "MatterId": matter_id,
-            "MatterWorkFlowStatusId": status_id,
-        })
-
-    def add_edit_workflow_status(self, **fields):
-        return self._request("WorkFlow.svc/json/AddEditWorkflowStatus", fields)
-
-    # ── Reports ────────────────────────────────────────────────────────────────
-
-    def run_report(self, report_id: int, **fields):
-        body = {"ReportId": report_id, **fields}
-        return self._request("Reports.svc/json/RunReport", body)
-
-    def get_report_summary(self):
-        return self._request("Reports.svc/json/GetReportSummary")
-
-    def get_report_metadata(self, report_id: int):
-        return self._request("Reports.svc/json/GetReportMetaData", {"ReportId": report_id})
-
-    # ── Search ─────────────────────────────────────────────────────────────────
-
-    def global_search(self, search_term: str):
-        return self._request("Search.svc/json/GlobalSearch", {"SearchText": search_term})
-
-    def search_occurrence_for_type(self, search_term: str, entity_type: str):
-        # API uses "Search" and "Type" fields
-        return self._request("Search.svc/json/SearchOccurenceForType", {
-            "Search": search_term,
-            "Type": entity_type,
-        })
-
-    # ── Recurring Billing ──────────────────────────────────────────────────────
-
-    def get_matter_payment_plan(self, matter_id: int):
-        # API uses camelCase "matterID"
-        return self._request("RecurringBilling.svc/json/getMatterPaymentPlan", {"matterID": matter_id})
-
-    def generate_payment_plan(self, **fields):
-        return self._request("RecurringBilling.svc/json/GeneratePaymentPlan", fields)
-
-    def commit_payment_plan(self, **fields):
-        return self._request("RecurringBilling.svc/json/CommitPlan", fields)
-
-    def cancel_payment_plan(self, plan_id: int):
-        return self._request("RecurringBilling.svc/json/cancelPaymentPlan", {"Id": plan_id})
-
-    # ── Matter Templates ───────────────────────────────────────────────────────
-
-    def get_all_matter_templates(self):
-        return self._request("MatterTemplates.svc/json/GetAll")
-
-    def get_matter_template(self, template_id: int):
-        return self._request("MatterTemplates.svc/json/Get", {"ID": template_id})
-
-    def save_matter_template(self, **fields):
-        return self._request("MatterTemplates.svc/json/Save", fields)
-
-    def delete_matter_template(self, template_id: int):
-        return self._request("MatterTemplates.svc/json/Delete", {"ID": template_id})
-
-    def get_new_matter_from_template(self, template_id: int):
-        return self._request("MatterTemplates.svc/json/GetNewMatterFromTemplate", {"ID": template_id})
-
-    # ── Court Rules ────────────────────────────────────────────────────────────
-
-    def get_matter_court_rules(self, matter_id: int):
-        return self._request("CourtRules.svc/json/GetMatterCourtRules", {"MatterId": matter_id})
-
-    def add_matter_court_rule(self, matter_id: int, court_rule_id: int):
-        return self._request("CourtRules.svc/json/AddMatterCourtRule", {
-            "MatterId": matter_id,
-            "CourtRuleId": court_rule_id,
-        })
-
-    def delete_matter_court_rule(self, matter_court_rule_id: int):
-        return self._request("CourtRules.svc/json/DeleteMatterCourtRule", {"MatterCourtRuleId": matter_court_rule_id})
-
-    def get_available_court_rules(self):
-        return self._request("CourtRules.svc/json/GetAvailableCourtRules")
-
-    def calculate_deadlines(self, tool_set_id: int, trigger_date: str, matter_id: int = 0,
-                            toggle_id: int = 0, toggle_option_id: int = 0, hearing_note: str = ""):
-        # API uses TriggerID (the toolset), TriggerDate, and optional params
-        body = {
-            "TriggerID": tool_set_id,
-            "TriggerDate": trigger_date,
-        }
+    def get_new_matter_definition(self, matter_id: int = None) -> dict:
         if matter_id:
-            body["MatterId"] = matter_id
-        if toggle_id:
-            body["ToggleID"] = toggle_id
-        if toggle_option_id:
-            body["ToggleOptionID"] = toggle_option_id
-        if hearing_note:
-            body["HearingNote"] = hearing_note
-        return self._request("CourtRules.svc/json/CalculateDeadlines", body)
+            return self._get(f"/v1/lookups/new-matter/definition/{matter_id}")
+        return self._get("/v1/lookups/new-matter/definition")
 
-    # ── Features ───────────────────────────────────────────────────────────────
+    def get_ebilling_defaults(self) -> dict:
+        return self._get("/v1/lookups/new-matter/ebilling-settings/defaults")
 
-    def get_firm_features(self):
-        return self._request("Features.svc/json/GetFirmFeatures")
+    def get_matter_type_workflow(self, matter_type_id: int) -> dict:
+        return self._get(f"/v1/lookups/matter-types/{matter_type_id}/workflow")
 
-    # ── Time Options ───────────────────────────────────────────────────────────
+    def get_client_labels(self) -> dict:
+        return self._get("/v1/lookups/client-labels")
 
-    def get_time_options(self):
-        return self._request("TimeOptions.svc/json/GetAll")
+    def get_matter_labels(self) -> dict:
+        return self._get("/v1/lookups/matter-labels")
+
+    def get_client_suggestions(self, search: str = None) -> dict:
+        params = {}
+        if search:
+            params["search"] = search
+        return self._get("/v1/lookups/clients", params=params)
+
+    def get_new_contact_defaults(self) -> dict:
+        return self._get("/v1/lookups/api/gui/form/newContact")
+
+    def get_expense_lookups(self) -> dict:
+        return self._get("/v1/lookups/expense")
+
+    def get_new_expense_lookups(self, matter_id: int = None) -> dict:
+        if matter_id:
+            return self._get("/v1/lookups/expense/new-expense-info",
+                             params={"matterId": matter_id})
+        return self._get("/v1/lookups/expense/new-expense")
+
+    def get_invoice_lookups(self) -> dict:
+        return self._get("/v1/lookups/invoice")
+
+    def get_new_invoice_lookups(self, matter_id: int = None) -> dict:
+        if matter_id:
+            return self._get("/v1/lookups/invoice/new-invoice-info",
+                             params={"matterId": matter_id})
+        return self._get("/v1/lookups/invoice/new-invoice")
+
+    def get_invoice_payment_lookups(self) -> dict:
+        return self._get("/v1/lookups/invoice-payments")
+
+    def get_time_entry_lookups(self, matter_id: int = None) -> dict:
+        params = {}
+        if matter_id:
+            params["matterId"] = matter_id
+        return self._get("/v1/lookups/time-entries/new-time", params=params)
+
+    def get_time_grid_lookups(self) -> dict:
+        return self._get("/v1/lookups/time-entries/new-timesheet-from-grid")
+
+    def get_transaction_lookups(self) -> dict:
+        return self._get("/v1/lookups/transactions/newTransaction")
+
+    def get_hard_cost_expense_lookups(self, matter_id: int = None) -> dict:
+        params = {}
+        if matter_id:
+            params["matterId"] = matter_id
+        return self._get("/v1/lookups/transactions/newHardCostExpense", params=params)
+
+    # ── Accounts Payable ───────────────────────────────────────────────────────
+
+    def list_ap_bills(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/accounts-payable/bills",
+                         params={"page": page, "pageSize": page_size}, user_token=False)
+
+    def get_ap_bill(self, bill_id: int) -> dict:
+        return self._get(f"/v1/accounts-payable/bills/{bill_id}", user_token=False)
+
+    def create_ap_bill(self, **fields) -> dict:
+        return self._post("/v1/accounts-payable/bills", body=fields, user_token=False)
+
+    def update_ap_bill(self, bill_id: int, **fields) -> dict:
+        return self._put(f"/v1/accounts-payable/bills/{bill_id}", body=fields, user_token=False)
+
+    def delete_ap_bill(self, bill_id: int) -> dict:
+        return self._delete(f"/v1/accounts-payable/bills/{bill_id}", user_token=False)
+
+    def list_ap_payments(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/accounts-payable/payments",
+                         params={"page": page, "pageSize": page_size}, user_token=False)
+
+    def create_ap_payment(self, **fields) -> dict:
+        return self._post("/v1/accounts-payable/payments", body=fields, user_token=False)
+
+    def get_ap_payment_status(self, **params) -> dict:
+        return self._get("/v1/accounts-payable/payments/status",
+                         params=params, user_token=False)
+
+    def list_ap_vendors(self, page: int = 1, page_size: int = 25) -> dict:
+        return self._get("/v1/accounts-payable/vendors",
+                         params={"page": page, "pageSize": page_size}, user_token=False)
+
+    def get_ap_vendor(self, vendor_id: int) -> dict:
+        return self._get(f"/v1/accounts-payable/vendors/{vendor_id}", user_token=False)
+
+    def create_ap_vendor(self, **fields) -> dict:
+        return self._post("/v1/accounts-payable/vendors", body=fields, user_token=False)
+
+    def update_ap_vendor(self, vendor_id: int, **fields) -> dict:
+        return self._put(f"/v1/accounts-payable/vendors/{vendor_id}", body=fields, user_token=False)

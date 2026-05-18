@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rocketmatter API client. Token auth via GrantToken, all calls are POST with JSON body."""
+"""Rocketmatter API client. OAuth 2.0 bearer token auth, all data calls are POST with JSON body."""
 
 import json
 import os
@@ -7,31 +7,13 @@ import sys
 import time
 import requests
 from pathlib import Path
-from datetime import datetime, timezone
 
 CONFIG_DIR = Path.home() / ".rocketmatter-mcp"
 
-
-def _load_env():
-    env_file = CONFIG_DIR / ".env"
-    if env_file.exists():
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, val = line.split("=", 1)
-                    os.environ.setdefault(key.strip(), val.strip())
-
-
-_load_env()
-
-DOMAIN = os.environ.get("ROCKETMATTER_DOMAIN", "")
-INSTALL = os.environ.get("ROCKETMATTER_INSTALL", "")
-USERNAME = os.environ.get("ROCKETMATTER_USERNAME", "")
-PASSWORD = os.environ.get("ROCKETMATTER_PASSWORD", "")
-
-BASE_URL = f"{DOMAIN.rstrip('/')}/{INSTALL}/API_V2" if DOMAIN and INSTALL else ""
-AUTH_URL = f"{DOMAIN.rstrip('/')}/{INSTALL}/API_V2/Authentication.svc/json" if DOMAIN and INSTALL else ""
+BASE_URL = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
+TOKEN_URL = f"{BASE_URL}/api/ext/auth/token"
+CLIENT_ID = os.environ.get("ROCKETMATTER_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
 
 
 def _retry_after_seconds(resp, default=10):
@@ -82,49 +64,34 @@ class TokenManager:
         expires_at = self.tokens.get("expires_at", 0)
         return time.time() >= expires_at - 60
 
-    def grant(self):
-        if not DOMAIN or not INSTALL or not USERNAME or not PASSWORD:
-            raise RuntimeError(
-                "ROCKETMATTER_DOMAIN, ROCKETMATTER_INSTALL, ROCKETMATTER_USERNAME, "
-                "and ROCKETMATTER_PASSWORD are required. Run: rocketmatter-mcp-setup"
-            )
-        resp = requests.post(f"{AUTH_URL}/GrantToken", json={
-            "username": USERNAME,
-            "password": PASSWORD,
-        })
-        if resp.status_code == 200:
-            tokens = _json_response(resp)
-            # Rocketmatter tokens typically last 24h; store expires_at
-            tokens["expires_at"] = time.time() + 86400
-            tokens["fetched_at"] = datetime.now(timezone.utc).isoformat()
-            self.save(tokens)
-            return tokens
-        raise RuntimeError(f"GrantToken failed ({resp.status_code}): {resp.text}")
-
     def refresh(self):
         if not self.refresh_token:
-            return self.grant()
-        resp = requests.post(f"{AUTH_URL}/RefreshToken", json={
+            raise RuntimeError("No refresh token found. Run: rocketmatter-mcp-setup")
+        resp = requests.post(TOKEN_URL, data={
+            "grant_type": "refresh_token",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
             "refresh_token": self.refresh_token,
         })
-        if resp.status_code == 200:
-            tokens = _json_response(resp)
-            tokens["expires_at"] = time.time() + 86400
-            tokens["fetched_at"] = datetime.now(timezone.utc).isoformat()
-            self.save(tokens)
-            return tokens
-        return self.grant()
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Token refresh failed ({resp.status_code}). Run: rocketmatter-mcp-setup"
+            )
+        tokens = _json_response(resp)
+        tokens["expires_at"] = time.time() + tokens.get("expires_in", 17999)
+        self.save(tokens)
+        return tokens
 
     def get_valid_token(self):
-        if not self.access_token or self.is_expired():
+        if not self.access_token:
+            raise RuntimeError("No tokens found. Run: rocketmatter-mcp-setup")
+        if self.is_expired():
             self.refresh()
         return self.access_token
 
 
 class RocketMatterClient:
     def __init__(self):
-        if not BASE_URL or not AUTH_URL:
-            raise RuntimeError("ROCKETMATTER_DOMAIN and ROCKETMATTER_INSTALL are required. Run: rocketmatter-mcp-setup")
         self.tm = TokenManager()
         self.session = requests.Session()
         self._refresh_headers()
@@ -145,7 +112,7 @@ class RocketMatterClient:
         resp = self.session.post(url, json=body or {})
 
         if resp.status_code == 401:
-            self.tm.grant()
+            self.tm.refresh()
             self._refresh_headers()
             resp = self.session.post(url, json=body or {})
 

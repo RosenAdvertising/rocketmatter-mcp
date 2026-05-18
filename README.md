@@ -30,7 +30,7 @@ MCP server for [Rocketmatter](https://rocketmatter.com) — full API coverage fo
 
 - Python 3.10+
 - Claude Desktop (or any MCP-compatible client)
-- Rocketmatter credentials (domain, install path, username, password)
+- Rocketmatter account at app.rocketmatter.net
 
 ## Installation
 
@@ -44,7 +44,7 @@ pip install rocketmatter-mcp
 rocketmatter-mcp-setup
 ```
 
-This prompts for your Rocketmatter domain, install path, username and password, then saves credentials to `~/.rocketmatter-mcp/`.
+This opens your browser to authorize via Rocketmatter OAuth. Log in, click Allow, and the script captures the callback and saves tokens automatically. No manual credential entry required.
 
 Verify:
 
@@ -66,14 +66,7 @@ rocketmatter-mcp-verify
 
 ## Authentication Notes
 
-Rocketmatter uses a username/password token flow via the `GrantToken` endpoint — no browser or OAuth redirect required. Tokens are refreshed automatically. Your credentials are stored locally at `~/.rocketmatter-mcp/.env` with 600 permissions.
-
-The base URL is constructed from your domain and install path:
-```
-{DOMAIN}/{INSTALL}/API_V2
-```
-
-For example: `https://app.rocketmatter.com/myfirm123/API_V2`
+Rocketmatter uses OAuth 2.0. Tokens are stored at `~/.rocketmatter-mcp/tokens.json` (chmod 600) and refreshed automatically. Access tokens expire in ~5 hours; the MCP handles refresh silently. If the refresh token expires, re-run `rocketmatter-mcp-setup`.
 
 ## Example usage in Claude
 

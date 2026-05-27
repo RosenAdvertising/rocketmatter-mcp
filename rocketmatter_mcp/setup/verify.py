@@ -11,7 +11,10 @@ def main():
     try:
         client = RocketMatterClient()
         user = client.get_current_user()
-        name = user.get("FullName", f"{user.get('FirstName', '')} {user.get('LastName', '')}".strip())
+        name = user.get(
+            "FullName",
+            f"{user.get('FirstName', '')} {user.get('LastName', '')}".strip(),
+        )
         print(f"✓ Authenticated as: {name}")
         print()
         print(json.dumps(user, indent=2))

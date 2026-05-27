@@ -27,7 +27,9 @@ def _safe_tool(*args, **kwargs):
                 return fn(*fn_args, **fn_kwargs)
             except Exception as e:
                 return json.dumps({"error": str(e)})
+
         return _raw_tool(*args, **kwargs)(wrapped)
+
     return decorator
 
 
@@ -52,14 +54,26 @@ def _fields(fields_json: str) -> dict:
 
 # ── Matters ────────────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
-def list_matters(page: int = 1, page_size: int = 25, active_only: bool = None,
-                 search_text: str = None, matter_owner_id: int = None) -> str:
+def list_matters(
+    page: int = 1,
+    page_size: int = 25,
+    active_only: bool = None,
+    search_text: str = None,
+    matter_owner_id: int = None,
+) -> str:
     """List matters. Supports pagination, search, and active-only filter."""
-    return json.dumps(_c().list_matters(
-        page=page, page_size=page_size, active_only=active_only,
-        search_text=search_text, matter_owner_id=matter_owner_id,
-    ), indent=2)
+    return json.dumps(
+        _c().list_matters(
+            page=page,
+            page_size=page_size,
+            active_only=active_only,
+            search_text=search_text,
+            matter_owner_id=matter_owner_id,
+        ),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -90,14 +104,26 @@ def delete_matter(matter_id: int) -> str:
 
 # ── Clients ────────────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
-def list_clients(page: int = 1, page_size: int = 25, active_only: bool = None,
-                 display_name: str = None, name: str = None) -> str:
+def list_clients(
+    page: int = 1,
+    page_size: int = 25,
+    active_only: bool = None,
+    display_name: str = None,
+    name: str = None,
+) -> str:
     """List clients. Supports search by display_name or name."""
-    return json.dumps(_c().list_clients(
-        page=page, page_size=page_size, active_only=active_only,
-        display_name=display_name, name=name,
-    ), indent=2)
+    return json.dumps(
+        _c().list_clients(
+            page=page,
+            page_size=page_size,
+            active_only=active_only,
+            display_name=display_name,
+            name=name,
+        ),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -127,6 +153,7 @@ def delete_client(client_id: int) -> str:
 
 
 # ── Contacts ───────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def list_contacts(page: int = 1, page_size: int = 25) -> str:
@@ -160,16 +187,28 @@ def delete_contact(contact_id: int) -> str:
 
 # ── Time Entries ───────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
-def list_time_entries(matter_id: int = None, rate_type: str = None,
-                      billing_status: str = None, card_status: str = None,
-                      page: int = 1, page_size: int = 25) -> str:
+def list_time_entries(
+    matter_id: int = None,
+    rate_type: str = None,
+    billing_status: str = None,
+    card_status: str = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> str:
     """List time entries. Filter by matter_id, rate_type, billing_status, card_status."""
-    return json.dumps(_c().list_time_entries(
-        matter_id=matter_id, rate_type=rate_type,
-        billing_status=billing_status, card_status=card_status,
-        page=page, page_size=page_size,
-    ), indent=2)
+    return json.dumps(
+        _c().list_time_entries(
+            matter_id=matter_id,
+            rate_type=rate_type,
+            billing_status=billing_status,
+            card_status=card_status,
+            page=page,
+            page_size=page_size,
+        ),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -187,7 +226,9 @@ def create_time_entry(fields_json: str) -> str:
 @mcp.tool()
 def update_time_entry(time_entry_id: int, fields_json: str) -> str:
     """Update a time entry by ID."""
-    return json.dumps(_c().update_time_entry(time_entry_id, **_fields(fields_json)), indent=2)
+    return json.dumps(
+        _c().update_time_entry(time_entry_id, **_fields(fields_json)), indent=2
+    )
 
 
 @mcp.tool()
@@ -198,14 +239,24 @@ def delete_time_entry(time_entry_id: int) -> str:
 
 # ── Expenses ───────────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
-def list_expenses(billing_type_id: int = None, billing_status_id: int = None,
-                  page: int = 1, page_size: int = 25) -> str:
+def list_expenses(
+    billing_type_id: int = None,
+    billing_status_id: int = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> str:
     """List expense cards."""
-    return json.dumps(_c().list_expenses(
-        billing_type_id=billing_type_id, billing_status_id=billing_status_id,
-        page=page, page_size=page_size,
-    ), indent=2)
+    return json.dumps(
+        _c().list_expenses(
+            billing_type_id=billing_type_id,
+            billing_status_id=billing_status_id,
+            page=page,
+            page_size=page_size,
+        ),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -233,6 +284,7 @@ def delete_expense(expense_id: int) -> str:
 
 
 # ── Invoices ───────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def list_invoices(page: int = 1, page_size: int = 25) -> str:
@@ -273,6 +325,7 @@ def approve_invoice(invoice_id: int, invoice_number: str) -> str:
 
 # ── Payments ───────────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 def list_payments(page: int = 1, page_size: int = 25) -> str:
     """List invoice payments with pagination."""
@@ -292,6 +345,7 @@ def get_invoice_allocations(fields_json: str = None) -> str:
 
 
 # ── Transactions ───────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def list_transactions(page: int = 1, page_size: int = 25) -> str:
@@ -314,7 +368,9 @@ def create_transaction(fields_json: str) -> str:
 @mcp.tool()
 def update_transaction(transaction_id: int, fields_json: str) -> str:
     """Update a transaction by ID."""
-    return json.dumps(_c().update_transaction(transaction_id, **_fields(fields_json)), indent=2)
+    return json.dumps(
+        _c().update_transaction(transaction_id, **_fields(fields_json)), indent=2
+    )
 
 
 @mcp.tool()
@@ -325,10 +381,13 @@ def delete_transaction(transaction_id: int) -> str:
 
 # ── Documents ──────────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 def list_documents(matter_id: int = None, path: str = None, doc_id: str = None) -> str:
     """List documents and folders. Filter by matter_id, path, or doc_id."""
-    return json.dumps(_c().list_documents(matter_id=matter_id, path=path, doc_id=doc_id), indent=2)
+    return json.dumps(
+        _c().list_documents(matter_id=matter_id, path=path, doc_id=doc_id), indent=2
+    )
 
 
 @mcp.tool()
@@ -357,6 +416,7 @@ def delete_document(path: str, doc_id: str) -> str:
 
 # ── Users / Timekeepers ────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 def list_users(page: int = 1, page_size: int = 25) -> str:
     """List users/timekeepers with pagination."""
@@ -371,10 +431,13 @@ def get_user(user_id: int) -> str:
 
 # ── Text Shortcuts ─────────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 def list_text_shortcuts(page: int = 1, page_size: int = 25) -> str:
     """List text shortcuts/shorthands."""
-    return json.dumps(_c().list_text_shortcuts(page=page, page_size=page_size), indent=2)
+    return json.dumps(
+        _c().list_text_shortcuts(page=page, page_size=page_size), indent=2
+    )
 
 
 @mcp.tool()
@@ -384,6 +447,7 @@ def get_text_shortcut(shortcut_id: int) -> str:
 
 
 # ── Codes ──────────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def get_codes(matter_id: int) -> str:
@@ -404,6 +468,7 @@ def get_activity_codes(matter_id: int) -> str:
 
 
 # ── Lookups ────────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def get_new_matter_defaults() -> str:
@@ -509,6 +574,7 @@ def get_hard_cost_expense_lookups(matter_id: int = None) -> str:
 
 # ── Accounts Payable ───────────────────────────────────────────────────────────
 
+
 @mcp.tool()
 def list_ap_bills(page: int = 1, page_size: int = 25) -> str:
     """List accounts payable bills."""
@@ -578,7 +644,9 @@ def create_ap_vendor(fields_json: str) -> str:
 @mcp.tool()
 def update_ap_vendor(vendor_id: int, fields_json: str) -> str:
     """Update an accounts payable vendor by ID."""
-    return json.dumps(_c().update_ap_vendor(vendor_id, **_fields(fields_json)), indent=2)
+    return json.dumps(
+        _c().update_ap_vendor(vendor_id, **_fields(fields_json)), indent=2
+    )
 
 
 def main():

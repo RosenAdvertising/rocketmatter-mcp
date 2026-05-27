@@ -35,16 +35,21 @@ def main():
 
     print("\nFetching user token...")
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"ApiKey {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    })
+    session.headers.update(
+        {
+            "Authorization": f"ApiKey {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
 
-    resp = session.post(f"{BASE_URL}/v1/lookups/user-token", json={
-        "username": username,
-        "password": password,
-    })
+    resp = session.post(
+        f"{BASE_URL}/v1/lookups/user-token",
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
 
     if resp.status_code != 200:
         print(f"Error: Token request failed ({resp.status_code}): {resp.text[:200]}")

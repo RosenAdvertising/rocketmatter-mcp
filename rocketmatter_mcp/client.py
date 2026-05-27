@@ -41,10 +41,13 @@ def _fetch_user_token(session: requests.Session) -> str:
             "ROCKETMATTER_USERNAME and ROCKETMATTER_PASSWORD must be set. "
             "Run: rocketmatter-mcp-setup"
         )
-    resp = session.post(f"{BASE_URL}/v1/lookups/user-token", json={
-        "username": USERNAME,
-        "password": PASSWORD,
-    })
+    resp = session.post(
+        f"{BASE_URL}/v1/lookups/user-token",
+        json={
+            "username": USERNAME,
+            "password": PASSWORD,
+        },
+    )
     if resp.status_code != 200:
         raise RuntimeError(
             f"User token request failed ({resp.status_code}): {resp.text[:200]}"
@@ -64,19 +67,26 @@ def _fetch_user_token(session: requests.Session) -> str:
 class LCSClient:
     def __init__(self):
         if not API_KEY:
-            raise RuntimeError("ROCKETMATTER_API_KEY must be set. Run: rocketmatter-mcp-setup")
+            raise RuntimeError(
+                "ROCKETMATTER_API_KEY must be set. Run: rocketmatter-mcp-setup"
+            )
 
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"ApiKey {API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"ApiKey {API_KEY}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
         self._user_token = self._get_user_token()
 
     def _get_user_token(self) -> str:
         tokens = _load_tokens()
-        if tokens.get("access_token") and time.time() < tokens.get("expires_at", 0) - 60:
+        if (
+            tokens.get("access_token")
+            and time.time() < tokens.get("expires_at", 0) - 60
+        ):
             return tokens["access_token"]
         return _fetch_user_token(self.session)
 
@@ -98,8 +108,11 @@ class LCSClient:
         resp = self.session.get(f"{BASE_URL}{path}", params=params, headers=headers)
         result = self._handle(resp)
         if result is None:
-            resp = self.session.get(f"{BASE_URL}{path}", params=params,
-                                    headers=self._user_headers() if user_token else {})
+            resp = self.session.get(
+                f"{BASE_URL}{path}",
+                params=params,
+                headers=self._user_headers() if user_token else {},
+            )
             return self._handle(resp)
         return result
 
@@ -108,8 +121,11 @@ class LCSClient:
         resp = self.session.post(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
         if result is None:
-            resp = self.session.post(f"{BASE_URL}{path}", json=body or {},
-                                     headers=self._user_headers() if user_token else {})
+            resp = self.session.post(
+                f"{BASE_URL}{path}",
+                json=body or {},
+                headers=self._user_headers() if user_token else {},
+            )
             return self._handle(resp)
         return result
 
@@ -118,8 +134,11 @@ class LCSClient:
         resp = self.session.put(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
         if result is None:
-            resp = self.session.put(f"{BASE_URL}{path}", json=body or {},
-                                    headers=self._user_headers() if user_token else {})
+            resp = self.session.put(
+                f"{BASE_URL}{path}",
+                json=body or {},
+                headers=self._user_headers() if user_token else {},
+            )
             return self._handle(resp)
         return result
 
@@ -128,8 +147,11 @@ class LCSClient:
         resp = self.session.patch(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
         if result is None:
-            resp = self.session.patch(f"{BASE_URL}{path}", json=body or {},
-                                      headers=self._user_headers() if user_token else {})
+            resp = self.session.patch(
+                f"{BASE_URL}{path}",
+                json=body or {},
+                headers=self._user_headers() if user_token else {},
+            )
             return self._handle(resp)
         return result
 
@@ -138,15 +160,24 @@ class LCSClient:
         resp = self.session.delete(f"{BASE_URL}{path}", params=params, headers=headers)
         result = self._handle(resp)
         if result is None:
-            resp = self.session.delete(f"{BASE_URL}{path}", params=params,
-                                       headers=self._user_headers() if user_token else {})
+            resp = self.session.delete(
+                f"{BASE_URL}{path}",
+                params=params,
+                headers=self._user_headers() if user_token else {},
+            )
             return self._handle(resp)
         return result
 
     # ── Matters ────────────────────────────────────────────────────────────────
 
-    def list_matters(self, page: int = 1, page_size: int = 25, active_only: bool = None,
-                     search_text: str = None, matter_owner_id: int = None) -> dict:
+    def list_matters(
+        self,
+        page: int = 1,
+        page_size: int = 25,
+        active_only: bool = None,
+        search_text: str = None,
+        matter_owner_id: int = None,
+    ) -> dict:
         params = {"page": page, "pageSize": page_size}
         if active_only is not None:
             params["activeOnly"] = active_only
@@ -170,8 +201,14 @@ class LCSClient:
 
     # ── Clients ────────────────────────────────────────────────────────────────
 
-    def list_clients(self, page: int = 1, page_size: int = 25, active_only: bool = None,
-                     display_name: str = None, name: str = None) -> dict:
+    def list_clients(
+        self,
+        page: int = 1,
+        page_size: int = 25,
+        active_only: bool = None,
+        display_name: str = None,
+        name: str = None,
+    ) -> dict:
         params = {"page": page, "pageSize": page_size}
         if active_only is not None:
             params["activeOnly"] = active_only
@@ -212,9 +249,15 @@ class LCSClient:
 
     # ── Time Entries ───────────────────────────────────────────────────────────
 
-    def list_time_entries(self, matter_id: int = None, rate_type: str = None,
-                          billing_status: str = None, card_status: str = None,
-                          page: int = 1, page_size: int = 25) -> dict:
+    def list_time_entries(
+        self,
+        matter_id: int = None,
+        rate_type: str = None,
+        billing_status: str = None,
+        card_status: str = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict:
         params = {"page": page, "pageSize": page_size}
         if matter_id:
             params["MatterId"] = matter_id
@@ -240,8 +283,13 @@ class LCSClient:
 
     # ── Expenses ───────────────────────────────────────────────────────────────
 
-    def list_expenses(self, billing_type_id: int = None, billing_status_id: int = None,
-                      page: int = 1, page_size: int = 25) -> dict:
+    def list_expenses(
+        self,
+        billing_type_id: int = None,
+        billing_status_id: int = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict:
         params = {"page": page, "pageSize": page_size}
         if billing_type_id:
             params["BillingTypeId"] = billing_type_id
@@ -279,8 +327,9 @@ class LCSClient:
         return self._delete(f"/v1/invoices/{invoice_id}")
 
     def approve_invoice(self, invoice_id: int, invoice_number: str) -> dict:
-        return self._post(f"/v1/invoices/{invoice_id}/approve",
-                          body={"invoiceNumber": invoice_number})
+        return self._post(
+            f"/v1/invoices/{invoice_id}/approve", body={"invoiceNumber": invoice_number}
+        )
 
     # ── Payments ───────────────────────────────────────────────────────────────
 
@@ -296,7 +345,9 @@ class LCSClient:
     # ── Transactions ───────────────────────────────────────────────────────────
 
     def list_transactions(self, page: int = 1, page_size: int = 25) -> dict:
-        return self._get("/v1/transactions", params={"page": page, "pageSize": page_size})
+        return self._get(
+            "/v1/transactions", params={"page": page, "pageSize": page_size}
+        )
 
     def get_transaction(self, transaction_id: int) -> dict:
         return self._get(f"/v1/transactions/{transaction_id}")
@@ -312,8 +363,9 @@ class LCSClient:
 
     # ── Documents ──────────────────────────────────────────────────────────────
 
-    def list_documents(self, matter_id: int = None, path: str = None,
-                       doc_id: str = None) -> dict:
+    def list_documents(
+        self, matter_id: int = None, path: str = None, doc_id: str = None
+    ) -> dict:
         params = {}
         if matter_id:
             params["matterId"] = matter_id
@@ -346,8 +398,9 @@ class LCSClient:
     # ── Text Shortcuts ─────────────────────────────────────────────────────────
 
     def list_text_shortcuts(self, page: int = 1, page_size: int = 25) -> dict:
-        return self._get("/v1/text-shortcuts",
-                         params={"page": page, "pageSize": page_size})
+        return self._get(
+            "/v1/text-shortcuts", params={"page": page, "pageSize": page_size}
+        )
 
     def get_text_shortcut(self, shortcut_id: int) -> dict:
         return self._get(f"/v1/text-shortcuts/{shortcut_id}")
@@ -358,10 +411,14 @@ class LCSClient:
         return self._get("/v1/codes", params={"matterId": matter_id}, user_token=False)
 
     def get_task_codes(self, matter_id: int) -> dict:
-        return self._get("/v1/codes/tasks", params={"matterId": matter_id}, user_token=False)
+        return self._get(
+            "/v1/codes/tasks", params={"matterId": matter_id}, user_token=False
+        )
 
     def get_activity_codes(self, matter_id: int) -> dict:
-        return self._get("/v1/codes/activities", params={"matterId": matter_id}, user_token=False)
+        return self._get(
+            "/v1/codes/activities", params={"matterId": matter_id}, user_token=False
+        )
 
     # ── Lookups ────────────────────────────────────────────────────────────────
 
@@ -399,8 +456,9 @@ class LCSClient:
 
     def get_new_expense_lookups(self, matter_id: int = None) -> dict:
         if matter_id:
-            return self._get("/v1/lookups/expense/new-expense-info",
-                             params={"matterId": matter_id})
+            return self._get(
+                "/v1/lookups/expense/new-expense-info", params={"matterId": matter_id}
+            )
         return self._get("/v1/lookups/expense/new-expense")
 
     def get_invoice_lookups(self) -> dict:
@@ -408,8 +466,9 @@ class LCSClient:
 
     def get_new_invoice_lookups(self, matter_id: int = None) -> dict:
         if matter_id:
-            return self._get("/v1/lookups/invoice/new-invoice-info",
-                             params={"matterId": matter_id})
+            return self._get(
+                "/v1/lookups/invoice/new-invoice-info", params={"matterId": matter_id}
+            )
         return self._get("/v1/lookups/invoice/new-invoice")
 
     def get_invoice_payment_lookups(self) -> dict:
@@ -436,8 +495,11 @@ class LCSClient:
     # ── Accounts Payable ───────────────────────────────────────────────────────
 
     def list_ap_bills(self, page: int = 1, page_size: int = 25) -> dict:
-        return self._get("/v1/accounts-payable/bills",
-                         params={"page": page, "pageSize": page_size}, user_token=False)
+        return self._get(
+            "/v1/accounts-payable/bills",
+            params={"page": page, "pageSize": page_size},
+            user_token=False,
+        )
 
     def get_ap_bill(self, bill_id: int) -> dict:
         return self._get(f"/v1/accounts-payable/bills/{bill_id}", user_token=False)
@@ -446,25 +508,36 @@ class LCSClient:
         return self._post("/v1/accounts-payable/bills", body=fields, user_token=False)
 
     def update_ap_bill(self, bill_id: int, **fields) -> dict:
-        return self._put(f"/v1/accounts-payable/bills/{bill_id}", body=fields, user_token=False)
+        return self._put(
+            f"/v1/accounts-payable/bills/{bill_id}", body=fields, user_token=False
+        )
 
     def delete_ap_bill(self, bill_id: int) -> dict:
         return self._delete(f"/v1/accounts-payable/bills/{bill_id}", user_token=False)
 
     def list_ap_payments(self, page: int = 1, page_size: int = 25) -> dict:
-        return self._get("/v1/accounts-payable/payments",
-                         params={"page": page, "pageSize": page_size}, user_token=False)
+        return self._get(
+            "/v1/accounts-payable/payments",
+            params={"page": page, "pageSize": page_size},
+            user_token=False,
+        )
 
     def create_ap_payment(self, **fields) -> dict:
-        return self._post("/v1/accounts-payable/payments", body=fields, user_token=False)
+        return self._post(
+            "/v1/accounts-payable/payments", body=fields, user_token=False
+        )
 
     def get_ap_payment_status(self, **params) -> dict:
-        return self._get("/v1/accounts-payable/payments/status",
-                         params=params, user_token=False)
+        return self._get(
+            "/v1/accounts-payable/payments/status", params=params, user_token=False
+        )
 
     def list_ap_vendors(self, page: int = 1, page_size: int = 25) -> dict:
-        return self._get("/v1/accounts-payable/vendors",
-                         params={"page": page, "pageSize": page_size}, user_token=False)
+        return self._get(
+            "/v1/accounts-payable/vendors",
+            params={"page": page, "pageSize": page_size},
+            user_token=False,
+        )
 
     def get_ap_vendor(self, vendor_id: int) -> dict:
         return self._get(f"/v1/accounts-payable/vendors/{vendor_id}", user_token=False)
@@ -473,4 +546,6 @@ class LCSClient:
         return self._post("/v1/accounts-payable/vendors", body=fields, user_token=False)
 
     def update_ap_vendor(self, vendor_id: int, **fields) -> dict:
-        return self._put(f"/v1/accounts-payable/vendors/{vendor_id}", body=fields, user_token=False)
+        return self._put(
+            f"/v1/accounts-payable/vendors/{vendor_id}", body=fields, user_token=False
+        )

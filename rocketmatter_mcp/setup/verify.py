@@ -3,21 +3,18 @@
 
 import json
 import sys
-from rocketmatter_mcp.client import RocketMatterClient
+from rocketmatter_mcp.client import LCSClient
 
 
 def main():
     print("Verifying Rocketmatter MCP credentials...")
     try:
-        client = RocketMatterClient()
-        user = client.get_current_user()
-        name = user.get(
-            "FullName",
-            f"{user.get('FirstName', '')} {user.get('LastName', '')}".strip(),
-        )
-        print(f"✓ Authenticated as: {name}")
+        client = LCSClient()
+        # A lightweight authenticated call confirms the user token is valid.
+        matters = client.list_matters(page=1, page_size=1)
+        print("✓ Authenticated — Rocketmatter API reachable")
         print()
-        print(json.dumps(user, indent=2))
+        print(json.dumps(matters, indent=2))
     except Exception as e:
         print(f"✗ Verification failed: {e}")
         sys.exit(1)

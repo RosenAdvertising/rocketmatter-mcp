@@ -40,7 +40,7 @@ def _c():
     return LCSClient()
 
 
-def _fields(fields_json: str) -> dict:
+def _fields(fields_json: str | None) -> dict:
     if not fields_json:
         return {}
     try:
@@ -59,9 +59,9 @@ def _fields(fields_json: str) -> dict:
 def list_matters(
     page: int = 1,
     page_size: int = 25,
-    active_only: bool = None,
-    search_text: str = None,
-    matter_owner_id: int = None,
+    active_only: bool | None = None,
+    search_text: str | None = None,
+    matter_owner_id: int | None = None,
 ) -> str:
     """List matters. Supports pagination, search, and active-only filter."""
     return json.dumps(
@@ -109,9 +109,9 @@ def delete_matter(matter_id: int) -> str:
 def list_clients(
     page: int = 1,
     page_size: int = 25,
-    active_only: bool = None,
-    display_name: str = None,
-    name: str = None,
+    active_only: bool | None = None,
+    display_name: str | None = None,
+    name: str | None = None,
 ) -> str:
     """List clients. Supports search by display_name or name."""
     return json.dumps(
@@ -190,10 +190,10 @@ def delete_contact(contact_id: int) -> str:
 
 @mcp.tool()
 def list_time_entries(
-    matter_id: int = None,
-    rate_type: str = None,
-    billing_status: str = None,
-    card_status: str = None,
+    matter_id: int | None = None,
+    rate_type: str | None = None,
+    billing_status: str | None = None,
+    card_status: str | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> str:
@@ -242,8 +242,8 @@ def delete_time_entry(time_entry_id: int) -> str:
 
 @mcp.tool()
 def list_expenses(
-    billing_type_id: int = None,
-    billing_status_id: int = None,
+    billing_type_id: int | None = None,
+    billing_status_id: int | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> str:
@@ -339,7 +339,7 @@ def create_payment(fields_json: str) -> str:
 
 
 @mcp.tool()
-def get_invoice_allocations(fields_json: str = None) -> str:
+def get_invoice_allocations(fields_json: str | None = None) -> str:
     """Get invoice allocation suggestions for a payment."""
     return json.dumps(_c().get_invoice_allocations(**_fields(fields_json)), indent=2)
 
@@ -383,7 +383,9 @@ def delete_transaction(transaction_id: int) -> str:
 
 
 @mcp.tool()
-def list_documents(matter_id: int = None, path: str = None, doc_id: str = None) -> str:
+def list_documents(
+    matter_id: int | None = None, path: str | None = None, doc_id: str | None = None
+) -> str:
     """List documents and folders. Filter by matter_id, path, or doc_id."""
     return json.dumps(
         _c().list_documents(matter_id=matter_id, path=path, doc_id=doc_id), indent=2
@@ -477,7 +479,7 @@ def get_new_matter_defaults() -> str:
 
 
 @mcp.tool()
-def get_new_matter_definition(matter_id: int = None) -> str:
+def get_new_matter_definition(matter_id: int | None = None) -> str:
     """Get NextGen defaults for a new or existing matter form."""
     return json.dumps(_c().get_new_matter_definition(matter_id=matter_id), indent=2)
 
@@ -507,7 +509,7 @@ def get_matter_labels() -> str:
 
 
 @mcp.tool()
-def get_client_suggestions(search: str = None) -> str:
+def get_client_suggestions(search: str | None = None) -> str:
     """Get client suggestions for the matter client selector."""
     return json.dumps(_c().get_client_suggestions(search=search), indent=2)
 
@@ -525,7 +527,7 @@ def get_expense_lookups() -> str:
 
 
 @mcp.tool()
-def get_new_expense_lookups(matter_id: int = None) -> str:
+def get_new_expense_lookups(matter_id: int | None = None) -> str:
     """Get lookup values for creating a soft cost expense card."""
     return json.dumps(_c().get_new_expense_lookups(matter_id=matter_id), indent=2)
 
@@ -537,7 +539,7 @@ def get_invoice_lookups() -> str:
 
 
 @mcp.tool()
-def get_new_invoice_lookups(matter_id: int = None) -> str:
+def get_new_invoice_lookups(matter_id: int | None = None) -> str:
     """Get lookup values for creating an invoice."""
     return json.dumps(_c().get_new_invoice_lookups(matter_id=matter_id), indent=2)
 
@@ -549,7 +551,7 @@ def get_invoice_payment_lookups() -> str:
 
 
 @mcp.tool()
-def get_time_entry_lookups(matter_id: int = None) -> str:
+def get_time_entry_lookups(matter_id: int | None = None) -> str:
     """Get lookup values for creating or editing a time entry."""
     return json.dumps(_c().get_time_entry_lookups(matter_id=matter_id), indent=2)
 
@@ -567,7 +569,7 @@ def get_transaction_lookups() -> str:
 
 
 @mcp.tool()
-def get_hard_cost_expense_lookups(matter_id: int = None) -> str:
+def get_hard_cost_expense_lookups(matter_id: int | None = None) -> str:
     """Get matter-specific lookup values for creating a hard cost expense."""
     return json.dumps(_c().get_hard_cost_expense_lookups(matter_id=matter_id), indent=2)
 
@@ -618,7 +620,7 @@ def create_ap_payment(fields_json: str) -> str:
 
 
 @mcp.tool()
-def get_ap_payment_status(fields_json: str = None) -> str:
+def get_ap_payment_status(fields_json: str | None = None) -> str:
     """Get payment status information for AP bills or credits."""
     return json.dumps(_c().get_ap_payment_status(**_fields(fields_json)), indent=2)
 

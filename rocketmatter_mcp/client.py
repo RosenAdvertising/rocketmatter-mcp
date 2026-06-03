@@ -93,7 +93,7 @@ class LCSClient:
     def _user_headers(self) -> dict:
         return {"X-User-Token": self._user_token}
 
-    def _handle(self, resp: requests.Response) -> dict:
+    def _handle(self, resp: requests.Response) -> dict | None:
         if resp.status_code == 401:
             self._user_token = _fetch_user_token(self.session)
             return None  # caller retries
@@ -103,7 +103,9 @@ class LCSClient:
             return {"success": True}
         return resp.json()
 
-    def _get(self, path: str, params: dict = None, user_token: bool = True) -> dict:
+    def _get(
+        self, path: str, params: dict | None = None, user_token: bool = True
+    ) -> dict:
         headers = self._user_headers() if user_token else {}
         resp = self.session.get(f"{BASE_URL}{path}", params=params, headers=headers)
         result = self._handle(resp)
@@ -113,10 +115,12 @@ class LCSClient:
                 params=params,
                 headers=self._user_headers() if user_token else {},
             )
-            return self._handle(resp)
+            return self._handle(resp) or {}
         return result
 
-    def _post(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+    def _post(
+        self, path: str, body: dict | None = None, user_token: bool = True
+    ) -> dict:
         headers = self._user_headers() if user_token else {}
         resp = self.session.post(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
@@ -126,10 +130,12 @@ class LCSClient:
                 json=body or {},
                 headers=self._user_headers() if user_token else {},
             )
-            return self._handle(resp)
+            return self._handle(resp) or {}
         return result
 
-    def _put(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+    def _put(
+        self, path: str, body: dict | None = None, user_token: bool = True
+    ) -> dict:
         headers = self._user_headers() if user_token else {}
         resp = self.session.put(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
@@ -139,10 +145,12 @@ class LCSClient:
                 json=body or {},
                 headers=self._user_headers() if user_token else {},
             )
-            return self._handle(resp)
+            return self._handle(resp) or {}
         return result
 
-    def _patch(self, path: str, body: dict = None, user_token: bool = True) -> dict:
+    def _patch(
+        self, path: str, body: dict | None = None, user_token: bool = True
+    ) -> dict:
         headers = self._user_headers() if user_token else {}
         resp = self.session.patch(f"{BASE_URL}{path}", json=body or {}, headers=headers)
         result = self._handle(resp)
@@ -152,10 +160,12 @@ class LCSClient:
                 json=body or {},
                 headers=self._user_headers() if user_token else {},
             )
-            return self._handle(resp)
+            return self._handle(resp) or {}
         return result
 
-    def _delete(self, path: str, params: dict = None, user_token: bool = True) -> dict:
+    def _delete(
+        self, path: str, params: dict | None = None, user_token: bool = True
+    ) -> dict:
         headers = self._user_headers() if user_token else {}
         resp = self.session.delete(f"{BASE_URL}{path}", params=params, headers=headers)
         result = self._handle(resp)
@@ -165,7 +175,7 @@ class LCSClient:
                 params=params,
                 headers=self._user_headers() if user_token else {},
             )
-            return self._handle(resp)
+            return self._handle(resp) or {}
         return result
 
     # ── Matters ────────────────────────────────────────────────────────────────
@@ -174,11 +184,11 @@ class LCSClient:
         self,
         page: int = 1,
         page_size: int = 25,
-        active_only: bool = None,
-        search_text: str = None,
-        matter_owner_id: int = None,
+        active_only: bool | None = None,
+        search_text: str | None = None,
+        matter_owner_id: int | None = None,
     ) -> dict:
-        params = {"page": page, "pageSize": page_size}
+        params: dict[str, object] = {"page": page, "pageSize": page_size}
         if active_only is not None:
             params["activeOnly"] = active_only
         if search_text:
@@ -205,11 +215,11 @@ class LCSClient:
         self,
         page: int = 1,
         page_size: int = 25,
-        active_only: bool = None,
-        display_name: str = None,
-        name: str = None,
+        active_only: bool | None = None,
+        display_name: str | None = None,
+        name: str | None = None,
     ) -> dict:
-        params = {"page": page, "pageSize": page_size}
+        params: dict[str, object] = {"page": page, "pageSize": page_size}
         if active_only is not None:
             params["activeOnly"] = active_only
         if display_name:
@@ -251,14 +261,14 @@ class LCSClient:
 
     def list_time_entries(
         self,
-        matter_id: int = None,
-        rate_type: str = None,
-        billing_status: str = None,
-        card_status: str = None,
+        matter_id: int | None = None,
+        rate_type: str | None = None,
+        billing_status: str | None = None,
+        card_status: str | None = None,
         page: int = 1,
         page_size: int = 25,
     ) -> dict:
-        params = {"page": page, "pageSize": page_size}
+        params: dict[str, object] = {"page": page, "pageSize": page_size}
         if matter_id:
             params["MatterId"] = matter_id
         if rate_type:
@@ -285,12 +295,12 @@ class LCSClient:
 
     def list_expenses(
         self,
-        billing_type_id: int = None,
-        billing_status_id: int = None,
+        billing_type_id: int | None = None,
+        billing_status_id: int | None = None,
         page: int = 1,
         page_size: int = 25,
     ) -> dict:
-        params = {"page": page, "pageSize": page_size}
+        params: dict[str, object] = {"page": page, "pageSize": page_size}
         if billing_type_id:
             params["BillingTypeId"] = billing_type_id
         if billing_status_id:
@@ -364,7 +374,10 @@ class LCSClient:
     # ── Documents ──────────────────────────────────────────────────────────────
 
     def list_documents(
-        self, matter_id: int = None, path: str = None, doc_id: str = None
+        self,
+        matter_id: int | None = None,
+        path: str | None = None,
+        doc_id: str | None = None,
     ) -> dict:
         params = {}
         if matter_id:
@@ -425,7 +438,7 @@ class LCSClient:
     def get_new_matter_defaults(self) -> dict:
         return self._get("/v1/lookups/new-matter/definition/defaults")
 
-    def get_new_matter_definition(self, matter_id: int = None) -> dict:
+    def get_new_matter_definition(self, matter_id: int | None = None) -> dict:
         if matter_id:
             return self._get(f"/v1/lookups/new-matter/definition/{matter_id}")
         return self._get("/v1/lookups/new-matter/definition")
@@ -442,7 +455,7 @@ class LCSClient:
     def get_matter_labels(self) -> dict:
         return self._get("/v1/lookups/matter-labels")
 
-    def get_client_suggestions(self, search: str = None) -> dict:
+    def get_client_suggestions(self, search: str | None = None) -> dict:
         params = {}
         if search:
             params["search"] = search
@@ -454,7 +467,7 @@ class LCSClient:
     def get_expense_lookups(self) -> dict:
         return self._get("/v1/lookups/expense")
 
-    def get_new_expense_lookups(self, matter_id: int = None) -> dict:
+    def get_new_expense_lookups(self, matter_id: int | None = None) -> dict:
         if matter_id:
             return self._get(
                 "/v1/lookups/expense/new-expense-info", params={"matterId": matter_id}
@@ -464,7 +477,7 @@ class LCSClient:
     def get_invoice_lookups(self) -> dict:
         return self._get("/v1/lookups/invoice")
 
-    def get_new_invoice_lookups(self, matter_id: int = None) -> dict:
+    def get_new_invoice_lookups(self, matter_id: int | None = None) -> dict:
         if matter_id:
             return self._get(
                 "/v1/lookups/invoice/new-invoice-info", params={"matterId": matter_id}
@@ -474,7 +487,7 @@ class LCSClient:
     def get_invoice_payment_lookups(self) -> dict:
         return self._get("/v1/lookups/invoice-payments")
 
-    def get_time_entry_lookups(self, matter_id: int = None) -> dict:
+    def get_time_entry_lookups(self, matter_id: int | None = None) -> dict:
         params = {}
         if matter_id:
             params["matterId"] = matter_id
@@ -486,7 +499,7 @@ class LCSClient:
     def get_transaction_lookups(self) -> dict:
         return self._get("/v1/lookups/transactions/newTransaction")
 
-    def get_hard_cost_expense_lookups(self, matter_id: int = None) -> dict:
+    def get_hard_cost_expense_lookups(self, matter_id: int | None = None) -> dict:
         params = {}
         if matter_id:
             params["matterId"] = matter_id

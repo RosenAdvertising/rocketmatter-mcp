@@ -71,15 +71,15 @@ Rocketmatter uses OAuth 2.0. Tokens are stored at `~/.rocketmatter-mcp/tokens.js
 ## Example usage in Claude
 
 > "Search my matters for Smith"
-
+>
 > "Log 2 hours on matter 456 for drafting the complaint"
-
+>
 > "Get all upcoming calendar events for matter 789"
-
+>
 > "Run an invoice for matter 123"
-
+>
 > "Show me the trust account balance for matter 456"
-
+>
 > "Calculate court deadlines for rule 12 from 2026-06-01"
 
 ## License

@@ -651,6 +651,117 @@ def update_ap_vendor(vendor_id: int, fields_json: str) -> str:
     )
 
 
+# ── Resources ─────────────────────────────────────────────────────────────────
+
+
+@mcp.resource("rocketmatter://matter_defaults", mime_type="application/json")
+def matter_defaults_resource() -> str:
+    """Global defaults for creating a new matter — billing methods, owners, and types."""
+    return json.dumps(_c().get_new_matter_defaults(), indent=2)
+
+
+@mcp.resource("rocketmatter://matter_labels", mime_type="application/json")
+def matter_labels_resource() -> str:
+    """All active matter labels configured in this Rocketmatter account."""
+    return json.dumps(_c().get_matter_labels(), indent=2)
+
+
+@mcp.resource("rocketmatter://security-notes", mime_type="text/markdown")
+def security_notes_resource() -> str:
+    """Security posture for rocketmatter-mcp.
+
+    ## Credentials
+    - **ROCKETMATTER_API_KEY**: ProfitSolv LCS Integration API key (ApiKey header).
+    - **ROCKETMATTER_USERNAME** / **ROCKETMATTER_PASSWORD**: used to obtain a short-lived
+      user access token for NextGen-proxied endpoints (X-User-Token header).
+      Credentials are read from process environment or `~/.rocketmatter-mcp/.env`
+      (chmod 0600). User tokens are cached in `~/.rocketmatter-mcp/tokens.json`
+      (chmod 0600) and refreshed automatically on expiry.
+      NOTE: env-stored password credential — migration to OS keyring is a separate task.
+
+    ## Tool classification
+    - **Read-only (safe):** list_matters, get_matter, list_clients, get_client,
+      list_contacts, get_contact, list_time_entries, get_time_entry, list_expenses,
+      get_expense, list_invoices, get_invoice, get_invoice_allocations, list_payments,
+      list_transactions, get_transaction, list_documents, get_document_default_app,
+      get_document_download_url, list_users, get_user, list_text_shortcuts,
+      get_text_shortcut, get_codes, get_task_codes, get_activity_codes,
+      get_new_matter_defaults, get_new_matter_definition, get_ebilling_defaults,
+      get_matter_type_workflow, get_client_labels, get_matter_labels,
+      get_client_suggestions, get_new_contact_defaults, get_expense_lookups,
+      get_new_expense_lookups, get_invoice_lookups, get_new_invoice_lookups,
+      get_invoice_payment_lookups, get_time_entry_lookups, get_time_grid_lookups,
+      get_transaction_lookups, get_hard_cost_expense_lookups, list_ap_bills, get_ap_bill,
+      list_ap_payments, get_ap_payment_status, list_ap_vendors, get_ap_vendor.
+    - **Write / side-effect:** create_matter, update_matter, delete_matter, create_client,
+      update_client, delete_client, create_contact, update_contact, delete_contact,
+      create_time_entry, update_time_entry, delete_time_entry, create_expense,
+      update_expense, delete_expense, create_invoice, update_invoice, delete_invoice,
+      approve_invoice, create_payment, create_transaction, update_transaction,
+      delete_transaction, get_document_upload_url, delete_document, create_ap_bill,
+      update_ap_bill, delete_ap_bill, create_ap_payment, create_ap_vendor,
+      update_ap_vendor.
+
+    ## Data sensitivity
+    Matters, time entries, invoices, transactions, and AP records contain billable legal
+    and financial data. Treat all matter-linked data as attorney-client privileged.
+    """
+    return security_notes_resource.__doc__ or ""
+
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+
+@mcp.prompt()
+def matter_billing_review(matter_id: str) -> str:
+    """Review unbilled time and outstanding invoices for a specific matter."""
+    return f"""Review billing status for matter {matter_id}:
+
+1. Call get_matter({matter_id}) — confirm matter name, billing method, and owner.
+2. Call list_time_entries with matter_id={matter_id} and billing_status filter for
+   unbilled entries — total hours and estimated value.
+3. Call list_invoices — filter to this matter; identify draft, sent, and overdue.
+4. Call get_invoice_allocations if any payments exist — confirm correct allocation.
+5. Call get_time_entry_lookups(matter_id={matter_id}) to check rate types available.
+6. Output:
+   - Matter: name | billing method | owner
+   - Unbilled time: X entries | Y hours | $Z estimated
+   - Invoices: draft | sent (unpaid) | paid this cycle
+   - Recommended action: generate invoice / follow up on overdue / no action"""
+
+
+@mcp.prompt()
+def new_matter_intake(client_id: str) -> str:
+    """Create a new matter for an existing client with correct defaults."""
+    return f"""Open a new matter for client {client_id}:
+
+1. Call get_client({client_id}) — confirm client name and status.
+2. Call get_new_matter_defaults — retrieve available billing methods, owners, and types.
+3. Call get_matter_labels — identify appropriate labels for this matter type.
+4. Determine the matter type and billing method based on client context.
+5. Call create_matter with fields_json containing:
+   clientId={client_id}, billingMethod (from defaults), matterOwnerId (from defaults),
+   matterName (descriptive), dateOpened (today), and areaOfLawId if applicable.
+6. Confirm matter created: return matter ID, name, and billing method.
+7. Call get_new_matter_definition(matter_id=<new_id>) — check for required fields."""
+
+
+@mcp.prompt()
+def accounts_receivable_review() -> str:
+    """Review all outstanding invoices and AP bills for firm AR/AP status."""
+    return """Generate an accounts receivable and payable summary for the firm:
+
+1. Call list_invoices — group by status; flag any sent invoices with age > 30 days.
+2. Call list_payments — identify recent payments applied in the last 30 days.
+3. Call list_ap_bills — list outstanding AP bills by vendor.
+4. Call list_ap_vendors — cross-reference vendor names for the AP list.
+5. Call get_invoice_payment_lookups — confirm available payment methods on file.
+6. Output:
+   - AR summary: Total outstanding | 0–30 days | 31–60 days | 60+ days
+   - AP summary: Total owed | Number of open bills | Top 3 vendors by amount
+   - Recommended: which invoices to follow up on immediately (highest and oldest first)"""
+
+
 def main():
     mcp.run()
 

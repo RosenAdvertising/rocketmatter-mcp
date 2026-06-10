@@ -13,7 +13,7 @@ keywords = ["rocketmatter", "mcp", "legal", "law", "claude", "practice-managemen
 dependencies = [
     "mcp>=1.27.2",
     "requests>=2.34.2",
-    "keyring>=24.0.0",
+    "keyring>=24.3.1",
 ]
 
 [project.scripts]

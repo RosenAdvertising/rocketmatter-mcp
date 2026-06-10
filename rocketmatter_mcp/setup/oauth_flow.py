@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Setup for rocketmatter-mcp — fetches and saves a user token via the LCS API."""
+"""Setup for rocketmatter-mcp — fetches and saves a user token via the LCS API.
+
+Credentials (API Key, username, password) are stored securely via the OS keyring
+(macOS Keychain / Windows Credential Manager / Linux Secret Service), falling
+back to a 0600 ``.env`` file when no keyring backend is available or
+``ROCKETMATTER_MCP_USE_KEYRING=0`` is set.
+"""
 
 import json
 import os
@@ -9,6 +15,8 @@ from getpass import getpass
 from pathlib import Path
 
 import requests
+
+from rocketmatter_mcp import credentials
 
 BASE_URL = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
 API_KEY = os.environ.get("ROCKETMATTER_API_KEY", "")
@@ -66,13 +74,25 @@ def main():
         "expires_at": time.time() + data.get("expires_in", 17999),
     }
 
+    backend = credentials.set_secret("ROCKETMATTER_API_KEY", api_key)
+    credentials.set_secret("ROCKETMATTER_USERNAME", username)
+    credentials.set_secret("ROCKETMATTER_PASSWORD", password)
+    if BASE_URL != "https://app.rocketmatter.net":
+        credentials.set_secret("ROCKETMATTER_BASE_URL", BASE_URL)
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     token_file = CONFIG_DIR / "tokens.json"
     with open(token_file, "w") as f:
         json.dump(tokens, f, indent=2)
     os.chmod(token_file, 0o600)
 
-    print(f"\nToken saved to {token_file}")
+    if backend == "keyring":
+        print(
+            f"\n✓ Credentials saved to the OS keyring ({credentials.storage_backend()})."
+        )
+    else:
+        print(f"\n✓ Credentials saved to {credentials.ENV_FILE} (0600).")
+    print(f"✓ Token saved to {token_file}")
     print("Run 'rocketmatter-mcp-verify' to test the connection.")
 
 

@@ -64,9 +64,35 @@ rocketmatter-mcp-verify
 }
 ```
 
+## Credential storage
+
+By default credentials are stored in your operating system's native secret store
+via the cross-platform [`keyring`](https://github.com/jaraco/keyring) library:
+
+| OS      | Backend                                  |
+| ------- | ---------------------------------------- |
+| macOS   | Keychain                                 |
+| Windows | Credential Manager                       |
+| Linux   | Secret Service (GNOME Keyring / KWallet) |
+
+Secrets are saved under the service name `rocketmatter-mcp`. Nothing is written to
+disk in clear text.
+
+**File fallback.** On a host with no keyring backend (e.g. a headless Linux box
+without Secret Service), or if you set `ROCKETMATTER_MCP_USE_KEYRING=0`, credentials
+fall back to a `~/.rocketmatter-mcp/.env` file with `0600` permissions.
+
+**Read order.** Credentials resolve in the order OS keyring → process environment
+→ `.env` file. So a rotated secret in the keyring always wins, and a
+`ROCKETMATTER_API_KEY` exported in your shell overrides the file fallback without
+touching the keyring.
+
 ## Authentication Notes
 
-Rocketmatter uses OAuth 2.0. Tokens are stored at `~/.rocketmatter-mcp/tokens.json` (chmod 600) and refreshed automatically. Access tokens expire in ~5 hours; the MCP handles refresh silently. If the refresh token expires, re-run `rocketmatter-mcp-setup`.
+Rocketmatter uses the LCS API (API key + username/password). Tokens are stored at
+`~/.rocketmatter-mcp/tokens.json` (chmod 600) and refreshed automatically. Access
+tokens expire in ~5 hours; the MCP handles refresh silently. If the token expires,
+re-run `rocketmatter-mcp-setup`.
 
 ## Example usage in Claude
 

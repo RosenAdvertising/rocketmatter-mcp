@@ -12,6 +12,18 @@ import time
 import requests
 from pathlib import Path
 
+from rocketmatter_mcp import credentials
+
+# Resolve credentials through the pluggable store (OS keyring -> .env file).
+credentials.load_into_environ(
+    [
+        "ROCKETMATTER_API_KEY",
+        "ROCKETMATTER_USERNAME",
+        "ROCKETMATTER_PASSWORD",
+        "ROCKETMATTER_BASE_URL",
+    ]
+)
+
 BASE_URL = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
 API_KEY = os.environ.get("ROCKETMATTER_API_KEY", "")
 USERNAME = os.environ.get("ROCKETMATTER_USERNAME", "")

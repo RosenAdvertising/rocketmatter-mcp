@@ -53,6 +53,10 @@ tools:
     read_write: read
   - name: get_invoice
     read_write: read
+  - name: generate_invoice
+    read_write: write
+  - name: list_billable_items
+    read_write: read
   - name: create_invoice
     read_write: write
   - name: update_invoice
@@ -70,6 +74,10 @@ tools:
   - name: list_transactions
     read_write: read
   - name: get_transaction
+    read_write: read
+  - name: list_banks
+    read_write: read
+  - name: list_chart_of_accounts
     read_write: read
   - name: create_transaction
     read_write: write
@@ -90,6 +98,10 @@ tools:
   - name: list_users
     read_write: read
   - name: get_user
+    read_write: read
+  - name: list_timekeepers
+    read_write: read
+  - name: get_firm_summary
     read_write: read
   - name: list_text_shortcuts
     read_write: read

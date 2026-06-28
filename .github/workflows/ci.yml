@@ -1,5 +1,4 @@
-# Cowork standard CI workflow (language-aware)
-# Propagated to <repo>/.github/workflows/ci.yml
+# CI workflow (language-aware).
 #
 # Runs:
 #   - pre-commit hooks (same checks devs run locally)
@@ -19,6 +18,9 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
   detect:
@@ -141,14 +143,14 @@ jobs:
     runs-on: ubuntu-latest
     # OSV-Scanner (Google) scans lockfiles against the OSV.dev vulnerability DB.
     # Replaces dependency-review-action, which requires GitHub Advanced Security
-    # (Dependency Graph + Code Security). GHAS is unavailable on the AsiaProGolf org
-    # AND on personal private repos, so dependency-review red-X'd every PR there.
+    # (Dependency Graph + Code Security). GHAS is unavailable on many orgs and on
+    # private repos, where dependency-review red-X's every PR.
     # OSV-Scanner is free and runs on ANY repo — public, private, any org — with no
     # GHAS dependency. We use the COMPOSITE action (not the reusable PR workflow):
     # the reusable workflow uploads SARIF to the Security tab, which on private repos
     # is itself a GHAS feature and would hit the same wall. The composite action runs
     # the scanner in-container, prints findings to the job log, and fails the job on
-    # any known vuln. (Toby, 2026-06-05: keep a working check everywhere, don't skip.)
+    # any known vuln. Keep a working check everywhere; don't skip.
     # NOTE: scans the whole lockfile and fails on any severity — stricter than the old
     # fail-on-severity:high diff gate. Add a .osv-scanner.toml allowlist for false
     # positives. Docs: https://google.github.io/osv-scanner/github-action/

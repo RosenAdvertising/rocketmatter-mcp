@@ -1,5 +1,4 @@
-# Cowork standard CI workflow (language-aware)
-# Propagated to <repo>/.github/workflows/ci.yml
+# CI workflow (language-aware).
 #
 # Runs:
 #   - pre-commit hooks (same checks devs run locally)

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocketmatter-mcp"
-version = "0.3.0"
-description = "MCP server for Rocketmatter — ProfitSolv LCS Integration API"
+version = "0.4.0"
+description = "MCP server for Rocketmatter — ProfitSolv LCS /v1 Integration API (scoped OAuth)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

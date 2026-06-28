@@ -4,33 +4,44 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-MCP server for [Rocketmatter](https://rocketmatter.com) — full API coverage for legal practice management. Use Rocketmatter from Claude Desktop with natural language.
+MCP server for [Rocketmatter](https://rocketmatter.com) — legal practice management
+from Claude Desktop in natural language, over the official **ProfitSolv LCS `/v1`
+Integration API** with a **scoped OAuth** integration.
+
+No password login: the server authorizes once in the browser, then refreshes its own
+token forever. It never trips Rocket Matter's single-session-per-user limit, so it
+won't log you out of your Rocket Matter browser session while it runs.
 
 ## What you can do
 
-- **Matters** — create, update, search, manage billing info, budgets, status, custom fields, court rules
-- **Clients & Contacts** — full CRUD, search, custom fields, contact data
-- **Tasks** — create, assign, complete, filter by matter or user
-- **Time & Expenses** — log billable time and expenses, manage activity types, LEDES codes
-- **Timers** — start, pause, bill running timers
-- **Invoices** — generate invoices, record payments, process refunds, manage templates
-- **Calendar** — appointments linked to matters, availability checks, date range queries
-- **Documents** — manage document records, folders, versions, download keys, templates
-- **Trust Accounting** — view trust balances per matter
-- **Rates** — custom matter rates, tax rates, discounts, surcharges, interest rates
-- **Workflow** — matter workflow statuses, apply transitions
-- **Reports** — run and retrieve firm reports
-- **Search** — global search across all entities
-- **Internal Messaging** — direct messages, channels
-- **Court Rules** — apply court rules, calculate deadlines
-- **Matter Templates** — create matters from templates
-- **Recurring Billing** — payment plans
+The LCS `/v1` Integration API covers the core practice-management entities:
+
+- **Matters** — list, get, create, update, delete
+- **Clients & Contacts** — full CRUD
+- **Time entries & Expenses** — full CRUD (log and edit billable time and costs)
+- **Invoices** — list, get, create, update, delete
+- **Payments** — list and record
+- **Transactions** — list (by matter or bank), get, create, update, delete
+- **Documents** — list (read-only)
+- **Users / timekeepers** — list, get
+- **UTBMS codes** — per matter
+
+### Not covered by the `/v1` API
+
+The `/v1` Integration API is narrower than Rocket Matter's internal UI. These are
+**not available** and their tools fail loudly (rather than returning nothing): firm
+financial summary, timekeeper time summaries, bank/chart-of-accounts enumeration,
+the two-step invoice-generation flow, accounts payable, lookup/defaults endpoints,
+and tasks, timers, calendar, tags, trust, rates, firm roles, tax/discount, phone
+messages, internal chat, workflow, reports, recurring billing, matter templates, and
+court rules.
 
 ## Requirements
 
 - Python 3.10+
 - Claude Desktop (or any MCP-compatible client)
-- Rocketmatter account at app.rocketmatter.net
+- A Rocket Matter account **and** a registered OAuth integration (API key + OAuth
+  client ID/secret) for the ProfitSolv LCS Integration API
 
 ## Installation
 
@@ -44,7 +55,22 @@ pip install rocketmatter-mcp
 rocketmatter-mcp-setup
 ```
 
-This opens your browser to authorize via Rocketmatter OAuth. Log in, click Allow, and the script captures the callback and saves tokens automatically. No manual credential entry required.
+The wizard:
+
+1. Stores your integration's **API key**, **OAuth client ID**, and **client secret**
+   in your OS keyring (see Credential storage below).
+2. Prints an authorization URL. Open it in your browser (logged in to Rocket Matter)
+   and click **Allow**.
+3. Your browser redirects to the app's registered redirect URI
+   (`https://example.com/oauth/callback`) with a `?code=...` parameter. The page may
+   show an error — that's fine; just copy the `code` value from the address bar and
+   paste it back into the wizard.
+4. The wizard exchanges the code for an access token + refresh token, cached at
+   `~/.rocketmatter-mcp/tokens.json` (chmod 600).
+
+After that, the client refreshes its own access token with the long-lived refresh
+token — no browser, no password — so you won't be prompted again unless the refresh
+token is revoked.
 
 Verify:
 
@@ -83,31 +109,37 @@ without Secret Service), or if you set `ROCKETMATTER_MCP_USE_KEYRING=0`, credent
 fall back to a `~/.rocketmatter-mcp/.env` file with `0600` permissions.
 
 **Read order.** Credentials resolve in the order OS keyring → process environment
-→ `.env` file. So a rotated secret in the keyring always wins, and a
-`ROCKETMATTER_API_KEY` exported in your shell overrides the file fallback without
-touching the keyring.
+→ `.env` file.
 
-## Authentication Notes
+## Authentication notes
 
-Rocketmatter uses the LCS API (API key + username/password). Tokens are stored at
-`~/.rocketmatter-mcp/tokens.json` (chmod 600) and refreshed automatically. Access
-tokens expire in ~5 hours; the MCP handles refresh silently. If the token expires,
-re-run `rocketmatter-mcp-setup`.
+The server uses the **ProfitSolv LCS `/v1` Integration API** with a scoped OAuth
+integration:
+
+- **Consent once** (`/OAuth/authorize` → `Allow`) to obtain an authorization code.
+- **Exchange** the code at `{base}/api/ext/auth/token` (`grant_type=authorization_code`)
+  for an `access_token` (~5h) + a long-lived `refresh_token`.
+- **Data calls** go to the LCS `/v1` host with two headers: `X-Api-Key: <app key>`
+  and `X-User-Token: <access token>`.
+- **Refresh** (`grant_type=refresh_token`) renews the access token without a password
+  login, so the user's Rocket Matter browser session is never bumped.
+
+Hosts are overridable via `ROCKETMATTER_BASE_URL` (OAuth host — Rocket Matter
+`app.rocketmatter.net`, CosmoLex `law.cosmolex.com`) and `ROCKETMATTER_API_BASE_URL`
+(the LCS `/v1` data host).
 
 ## Example usage in Claude
 
-> "Search my matters for Smith"
+> "List my matters"
 >
-> "Log 2 hours on matter 456 for drafting the complaint"
+> "Create a client named Acme Holdings"
 >
-> "Get all upcoming calendar events for matter 789"
+> "Log a time entry on matter <id>"
 >
-> "Run an invoice for matter 123"
+> "Show open invoices and recent payments"
 >
-> "Show me the trust account balance for matter 456"
->
-> "Calculate court deadlines for rule 12 from 2026-06-01"
+> "List the firm's users"
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

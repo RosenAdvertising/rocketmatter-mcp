@@ -1,98 +1,124 @@
 #!/usr/bin/env python3
-"""Setup for rocketmatter-mcp — fetches and saves a user token via the LCS API.
+"""Setup for rocketmatter-mcp — scoped OAuth (ProfitSolv LCS /v1 Integration API).
 
-Credentials (API Key, username, password) are stored securely via the OS keyring
-(macOS Keychain / Windows Credential Manager / Linux Secret Service), falling
-back to a 0600 ``.env`` file when no keyring backend is available or
-``ROCKETMATTER_MCP_USE_KEYRING=0`` is set.
+Stores the app's API key + OAuth client_id/client_secret, then runs the one-time
+authorization-code consent so the MCP gets an access_token + a long-lived
+refresh_token. After this, the client refreshes its own token forever — no password
+login, so it never trips Rocket Matter's single-session limit or logs you out.
+
+Because the dev OAuth app registers a non-localhost redirect
+(``https://example.com/oauth/callback``), consent uses a MANUAL copy-paste flow:
+the wizard prints the authorize URL, you open it and click Allow, then copy the
+``code`` value out of the redirected address bar and paste it back here. (Once a
+localhost redirect is registered on the app, this can become an auto-catcher.)
+
+Non-interactive use: set ROCKETMATTER_API_KEY / ROCKETMATTER_CLIENT_ID /
+ROCKETMATTER_CLIENT_SECRET in the environment, and pass the code via ``--code`` or
+ROCKETMATTER_OAUTH_CODE.
 """
 
-import json
+import getpass
 import os
 import sys
-import time
-from getpass import getpass
-from pathlib import Path
-
-import requests
 
 from rocketmatter_mcp import credentials
+from rocketmatter_mcp.client import (
+    DEFAULT_REDIRECT_URI,
+    OAUTH_BASE,
+    REGISTERED_REDIRECT_URI,
+    build_authorize_url,
+    exchange_code,
+)
 
-BASE_URL = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
-API_KEY = os.environ.get("ROCKETMATTER_API_KEY", "")
-CONFIG_DIR = Path.home() / ".rocketmatter-mcp"
+
+def _capture(name: str, prompt: str, secret: bool = False) -> str:
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    val = (getpass.getpass(prompt) if secret else input(prompt)).strip()
+    return val
 
 
 def main():
-    print("=== rocketmatter-mcp Setup ===\n")
+    print("=== rocketmatter-mcp Setup (scoped OAuth — LCS /v1 Integration API) ===\n")
+    print(f"OAuth host: {OAUTH_BASE}")
+    print("You'll need your integration's API key, client ID, and client secret")
+    print("(from the ProfitSolv / Rocket Matter developer app).\n")
 
-    api_key = API_KEY
-    if not api_key:
-        api_key = input("LCS API Key: ").strip()
-        if not api_key:
-            print("Error: API key required.")
-            sys.exit(1)
-
-    username = os.environ.get("ROCKETMATTER_USERNAME", "").strip()
-    if not username:
-        username = input("Rocketmatter username (email): ").strip()
-
-    password = os.environ.get("ROCKETMATTER_PASSWORD", "").strip()
-    if not password:
-        password = getpass("Rocketmatter password: ")
-
-    print("\nFetching user token...")
-    session = requests.Session()
-    session.headers.update(
-        {
-            "Authorization": f"ApiKey {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    api_key = _capture("ROCKETMATTER_API_KEY", "API key (X-Api-Key): ", secret=True)
+    client_id = _capture("ROCKETMATTER_CLIENT_ID", "OAuth client ID (ci-...): ")
+    client_secret = _capture(
+        "ROCKETMATTER_CLIENT_SECRET", "OAuth client secret: ", secret=True
+    )
+    redirect_uri = (
+        os.environ.get("ROCKETMATTER_REDIRECT_URI", "").strip() or DEFAULT_REDIRECT_URI
     )
 
-    resp = session.post(
-        f"{BASE_URL}/v1/lookups/user-token",
-        json={
-            "username": username,
-            "password": password,
-        },
-    )
+    # Guard against a stale/wrong stored redirect URI. The OAuth app only accepts its
+    # REGISTERED redirect, so a stored/overridden value that differs from it breaks
+    # first-time consent (a bad_request at the authorize step). Compare against the hard
+    # REGISTERED_REDIRECT_URI constant — NOT DEFAULT_REDIRECT_URI, which is itself
+    # env-derived and would equal a wrong override, making the check dead. Warn loud.
+    if redirect_uri != REGISTERED_REDIRECT_URI:
+        print(
+            f"\n⚠  ROCKETMATTER_REDIRECT_URI is set to:\n     {redirect_uri}\n"
+            f"   which differs from the app's registered redirect:\n     {REGISTERED_REDIRECT_URI}\n"
+            "   Consent will FAIL unless that exact URI is registered on the OAuth app.\n"
+            "   Unset ROCKETMATTER_REDIRECT_URI to use the registered default."
+        )
 
-    if resp.status_code != 200:
-        print(f"Error: Token request failed ({resp.status_code}): {resp.text[:200]}")
+    if not (api_key and client_id and client_secret):
+        print("Error: API key, client ID, and client secret are all required.")
         sys.exit(1)
 
-    data = resp.json()
-    token = data.get("access_token", "")
-    if not token:
-        print(f"Error: No access_token in response: {data}")
-        sys.exit(1)
-
-    tokens = {
-        "access_token": token,
-        "expires_at": time.time() + data.get("expires_in", 17999),
-    }
-
+    # Persist the app credentials (keyring, 0600 .env fallback) AND make them visible
+    # to exchange_code() in this same process.
     backend = credentials.set_secret("ROCKETMATTER_API_KEY", api_key)
-    credentials.set_secret("ROCKETMATTER_USERNAME", username)
-    credentials.set_secret("ROCKETMATTER_PASSWORD", password)
-    if BASE_URL != "https://app.rocketmatter.net":
-        credentials.set_secret("ROCKETMATTER_BASE_URL", BASE_URL)
-
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    token_file = CONFIG_DIR / "tokens.json"
-    with open(token_file, "w") as f:
-        json.dump(tokens, f, indent=2)
-    os.chmod(token_file, 0o600)
+    credentials.set_secret("ROCKETMATTER_CLIENT_ID", client_id)
+    credentials.set_secret("ROCKETMATTER_CLIENT_SECRET", client_secret)
+    if redirect_uri != DEFAULT_REDIRECT_URI:
+        credentials.set_secret("ROCKETMATTER_REDIRECT_URI", redirect_uri)
+    os.environ["ROCKETMATTER_CLIENT_ID"] = client_id
+    os.environ["ROCKETMATTER_CLIENT_SECRET"] = client_secret
 
     if backend == "keyring":
         print(
-            f"\n✓ Credentials saved to the OS keyring ({credentials.storage_backend()})."
+            f"\n✓ App credentials saved to the OS keyring ({credentials.storage_backend()})."
         )
     else:
-        print(f"\n✓ Credentials saved to {credentials.ENV_FILE} (0600).")
-    print(f"✓ Token saved to {token_file}")
+        print(f"\n✓ App credentials saved to {credentials.ENV_FILE} (0600).")
+
+    # ── One-time consent ─────────────────────────────────────────────────────
+    auth_url = build_authorize_url(redirect_uri, client_id)
+    print("\n--- One-time authorization ---")
+    print("1. Open this URL in your browser (logged in to Rocket Matter):\n")
+    print(f"   {auth_url}\n")
+    print("2. Click 'Allow'. Your browser will redirect to")
+    print(f"   {redirect_uri}?code=...")
+    print("3. Copy the value of the 'code' query parameter from the address bar.\n")
+
+    code = os.environ.get("ROCKETMATTER_OAUTH_CODE", "").strip()
+    for arg in sys.argv[1:]:
+        if arg.startswith("--code="):
+            code = arg.split("=", 1)[1].strip()
+    if not code:
+        code = input("Paste the authorization code here: ").strip()
+    if not code:
+        print("Error: no authorization code provided.")
+        sys.exit(1)
+
+    try:
+        tokens = exchange_code(code, redirect_uri, client_id, client_secret)
+    except Exception as e:  # noqa: BLE001
+        print(f"\n✗ Authorization failed: {e}")
+        print(
+            "Re-run rocketmatter-mcp-setup and try a fresh code (codes are single-use)."
+        )
+        sys.exit(1)
+
+    print("\n✓ Authorized — access + refresh tokens saved (chmod 600).")
+    if tokens.get("firm_id"):
+        print(f"  Firm: {tokens['firm_id']}   User: {tokens.get('user_name', '?')}")
     print("Run 'rocketmatter-mcp-verify' to test the connection.")
 
 

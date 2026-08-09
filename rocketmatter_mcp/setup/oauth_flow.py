@@ -110,7 +110,7 @@ def main():
     try:
         tokens = exchange_code(code, redirect_uri, client_id, client_secret)
     except Exception as e:  # noqa: BLE001
-        print(f"\n✗ Authorization failed: {e}")
+        print(f"\n✗ Authorization failed ({type(e).__name__}).")
         print(
             "Re-run rocketmatter-mcp-setup and try a fresh code (codes are single-use)."
         )
@@ -118,7 +118,7 @@ def main():
 
     print("\n✓ Authorized — access + refresh tokens saved (chmod 600).")
     if tokens.get("firm_id"):
-        print(f"  Firm: {tokens['firm_id']}   User: {tokens.get('user_name', '?')}")
+        print(f"  Firm: {tokens['firm_id']}")
     print("Run 'rocketmatter-mcp-verify' to test the connection.")
 
 

@@ -42,6 +42,7 @@ of silently returning nothing, pending Toby's keep/drop call. See the module
 """
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -50,6 +51,8 @@ from urllib.parse import urlencode
 import requests
 
 from rocketmatter_mcp import credentials
+
+logger = logging.getLogger(__name__)
 
 # Resolve credentials through the pluggable store (OS keyring -> env -> .env file).
 # The LCS /v1 OAuth model needs the app's API key + the OAuth client_id/secret; the
@@ -171,7 +174,8 @@ def _token_record(data: dict, prev: dict | None = None) -> dict:
     prev = prev or {}
     access = data.get("access_token")
     if not access:
-        raise RuntimeError(f"Token response had no access_token: {str(data)[:200]}")
+        logger.warning("oauth_response_rejected reason=missing_access_token")
+        raise RuntimeError("Token response had no access_token")
     return {
         "access_token": access,
         "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
@@ -219,6 +223,7 @@ def exchange_code(
     client_id = client_id or os.environ.get("ROCKETMATTER_CLIENT_ID", "")
     client_secret = client_secret or os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
     if not (client_id and client_secret):
+        logger.warning("oauth_request_rejected reason=missing_client_credentials")
         raise RuntimeError(
             "ROCKETMATTER_CLIENT_ID and ROCKETMATTER_CLIENT_SECRET are required to "
             "exchange the authorization code. Run: rocketmatter-mcp-setup"
@@ -235,10 +240,11 @@ def exchange_code(
         timeout=30,
     )
     if not resp.ok:
-        raise RuntimeError(
-            f"Authorization-code exchange failed ({resp.status_code}): "
-            f"{resp.text[:300]}"
+        logger.warning(
+            "oauth_response_rejected reason=authorization_exchange_failed status=%s",
+            resp.status_code,
         )
+        raise RuntimeError(f"Authorization-code exchange failed ({resp.status_code})")
     tokens = _token_record(resp.json())
     if save:
         _save_tokens(tokens)
@@ -261,10 +267,12 @@ class LCSClient:
         self._client_secret = os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
         self._tokens = _load_tokens()
         if not self._tokens.get("access_token"):
+            logger.warning("client_initialization_rejected reason=missing_oauth_tokens")
             raise RuntimeError(
                 "No Rocket Matter OAuth tokens found. Run: rocketmatter-mcp-setup"
             )
         if not self._api_key:
+            logger.warning("client_initialization_rejected reason=missing_api_key")
             raise RuntimeError(
                 "ROCKETMATTER_API_KEY is not set. Run: rocketmatter-mcp-setup"
             )
@@ -280,8 +288,10 @@ class LCSClient:
         """Get a fresh access token via the long-lived refresh token (no password)."""
         refresh_token = self._tokens.get("refresh_token")
         if not refresh_token:
+            logger.warning("oauth_request_rejected reason=missing_refresh_token")
             raise RuntimeError("No refresh_token cached. Run: rocketmatter-mcp-setup")
         if not (self._client_id and self._client_secret):
+            logger.warning("oauth_request_rejected reason=missing_client_credentials")
             raise RuntimeError(
                 "ROCKETMATTER_CLIENT_ID / ROCKETMATTER_CLIENT_SECRET not set. "
                 "Run: rocketmatter-mcp-setup"
@@ -298,8 +308,12 @@ class LCSClient:
             timeout=30,
         )
         if not resp.ok:
+            logger.warning(
+                "oauth_response_rejected reason=token_refresh_failed status=%s",
+                resp.status_code,
+            )
             raise RuntimeError(
-                f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. "
+                f"Token refresh failed ({resp.status_code}). "
                 "The refresh token may be revoked — re-run rocketmatter-mcp-setup."
             )
         self._tokens = _token_record(resp.json(), self._tokens)
@@ -352,9 +366,10 @@ class LCSClient:
     def _json_or_raise(resp: requests.Response):
         """Parse a JSON body, or raise a loud error on a non-2xx response."""
         if not resp.ok:
-            raise RuntimeError(
-                f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "api_response_rejected reason=http_error status=%s", resp.status_code
             )
+            raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
         if not resp.content:
             return {}
         return resp.json()
@@ -367,9 +382,35 @@ class LCSClient:
         ``page`` / ``pageSize`` are the live-confirmed pagination params; extra
         non-None query params (filters) pass through unchanged.
         """
+        if page < 1:
+            logger.warning("list_request_rejected reason=page_below_minimum")
+            raise ValueError("page must be at least 1")
+        if not 1 <= page_size <= 200:
+            logger.warning("list_request_rejected reason=page_size_out_of_range")
+            raise ValueError("page_size must be between 1 and 200")
+
         query: dict = {"page": page, "pageSize": page_size}
         query.update({k: v for k, v in params.items() if v is not None})
-        return self._json_or_raise(self._send("GET", resource, params=query))
+        result = self._json_or_raise(self._send("GET", resource, params=query))
+
+        # Enforce the caller's requested cap even if an upstream endpoint ignores
+        # pageSize. Most endpoints return an envelope; documents may return a list.
+        if isinstance(result, list):
+            if len(result) > page_size:
+                logger.warning(
+                    "list_response_capped reason=upstream_over_return resource=%s",
+                    resource,
+                )
+            return result[:page_size]
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            items = result["items"]
+            if len(items) > page_size:
+                logger.warning(
+                    "list_response_capped reason=upstream_over_return resource=%s",
+                    resource,
+                )
+                result = {**result, "items": items[:page_size]}
+        return result
 
     @staticmethod
     def _is_error_envelope(data: dict) -> bool:
@@ -405,7 +446,13 @@ class LCSClient:
             except ValueError:
                 data = None
         if resp.ok:
-            return data if isinstance(data, dict) else None
+            if isinstance(data, dict):
+                return data
+            logger.warning(
+                "api_response_rejected reason=invalid_detail_shape resource=%s",
+                resource,
+            )
+            return None
         if resp.status_code == 404:
             # Known quirk: an existing record is occasionally returned WITH a 404
             # status but a full record body. Accept that ONLY when the body is a real
@@ -417,10 +464,14 @@ class LCSClient:
                 and not self._is_error_envelope(data)
             ):
                 return data
+            logger.info("api_response_rejected reason=not_found resource=%s", resource)
             return None
-        raise RuntimeError(
-            f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+        logger.warning(
+            "api_response_rejected reason=http_error resource=%s status=%s",
+            resource,
+            resp.status_code,
         )
+        raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
 
     def _create(self, resource: str, body: dict) -> dict:
         """POST to a collection -> the created record (201)."""
@@ -438,7 +489,10 @@ class LCSClient:
         """
         current = self._detail(resource, record_id)
         if current is None:
-            raise RuntimeError(f"{resource} {record_id} not found; cannot update.")
+            logger.warning(
+                "update_request_rejected reason=record_not_found resource=%s", resource
+            )
+            raise RuntimeError(f"{resource} record not found; cannot update.")
         merged = {**current, **fields}
         return self._json_or_raise(
             self._send(method, f"{resource}/{record_id}", body=merged)
@@ -456,9 +510,12 @@ class LCSClient:
         """
         resp = self._send("DELETE", f"{resource}/{record_id}")
         if not resp.ok:
-            raise RuntimeError(
-                f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "delete_response_rejected reason=http_error resource=%s status=%s",
+                resource,
+                resp.status_code,
             )
+            raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
         if not resp.content:
             return {"success": True}
         try:
@@ -473,9 +530,15 @@ class LCSClient:
                 and (data.get("error") or data.get("errors"))
             )
         ):
+            logger.warning(
+                "delete_response_rejected reason=semantic_failure resource=%s "
+                "status=%s",
+                resource,
+                resp.status_code,
+            )
             raise RuntimeError(
-                f"RocketMatter /v1 delete reported failure despite HTTP "
-                f"{resp.status_code}: {str(data)[:400]}"
+                "RocketMatter /v1 delete reported failure despite HTTP "
+                f"{resp.status_code}"
             )
         return {"success": True}
 
@@ -485,6 +548,9 @@ class LCSClient:
         Never returns a false success — the tool raises so the gap is visible
         (Rule 12). Kept registered for Toby's keep/drop call; see ``COVERAGE_DELTA``.
         """
+        logger.warning(
+            "capability_request_rejected reason=not_in_v1 capability=%s", capability
+        )
         return RuntimeError(
             f"'{capability}' is not available in the ProfitSolv LCS /v1 Integration "
             "API (the scoped-OAuth data API this MCP uses). It existed on the legacy "
@@ -706,6 +772,7 @@ class LCSClient:
         ``bank_id`` must come from the Rocket Matter UI.
         """
         if not (matter_id or bank_id):
+            logger.warning("list_request_rejected reason=missing_transaction_scope")
             raise RuntimeError(
                 "list_transactions requires matter_id or bank_id — the LCS /v1 "
                 "transactions endpoint has no firm-wide listing, and /v1 exposes no "

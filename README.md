@@ -102,8 +102,8 @@ via the cross-platform [`keyring`](https://github.com/jaraco/keyring) library:
 | Windows | Credential Manager                       |
 | Linux   | Secret Service (GNOME Keyring / KWallet) |
 
-Secrets are saved under the service name `rocketmatter-mcp`. Nothing is written to
-disk in clear text.
+With a working keyring backend, secrets are saved under the service name
+`rocketmatter-mcp` and are not written to the fallback file.
 
 **File fallback.** On a host with no keyring backend (e.g. a headless Linux box
 without Secret Service), or if you set `ROCKETMATTER_MCP_USE_KEYRING=0`, credentials

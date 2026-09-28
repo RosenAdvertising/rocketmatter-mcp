@@ -39,6 +39,7 @@ court rules.
 ## Requirements
 
 - Python 3.10+
+- Python MCP SDK >=2.2,<3 (protocol revision 2026-07-28)
 - Claude Desktop (or any MCP-compatible client)
 - A Rocket Matter account **and** a registered OAuth integration (API key + OAuth
   client ID/secret) for the ProfitSolv LCS Integration API

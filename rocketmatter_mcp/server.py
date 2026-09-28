@@ -5,12 +5,13 @@ import json
 import logging
 from typing import Annotated
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from rocketmatter_mcp.client import LCSClient
 
-mcp = FastMCP(
+mcp = MCPServer(
     "rocketmatter",
     instructions=(
         "Rocketmatter legal practice management via the ProfitSolv LCS /v1 Integration "
@@ -24,10 +25,8 @@ mcp = FastMCP(
     ),
 )
 
-# Tools call the client directly and let exceptions propagate: FastMCP wraps a
-# raised exception into a CallToolResult with ``isError=True`` (the message in the
-# content), which is the correct MCP error contract. An earlier wrapper that caught
-# exceptions and returned ``{"error": ...}`` as a NORMAL result hid failures behind
+# MCPServer reports ToolError and unexpected exceptions as isError results. An
+# earlier wrapper returned ``{"error": ...}`` as a normal result and hid failures behind
 # ``isError=False`` — a write that applied but whose response errored looked failed,
 # risking a retry/duplicate. Failing loud via ``isError`` is both correct and safe.
 
@@ -55,10 +54,10 @@ def _fields(fields_json: str | None) -> dict:
         fields = json.loads(fields_json)
     except json.JSONDecodeError as e:
         logger.warning("tool_input_rejected reason=fields_json_invalid_json")
-        raise ValueError("Invalid fields_json: malformed JSON") from e
+        raise ToolError("Invalid fields_json: malformed JSON") from e
     if not isinstance(fields, dict):
         logger.warning("tool_input_rejected reason=fields_json_not_object")
-        raise ValueError("fields_json must be a JSON object")
+        raise ToolError("fields_json must be a JSON object")
     return fields
 
 

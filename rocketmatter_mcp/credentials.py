@@ -159,7 +159,7 @@ def delete_secret(key: str) -> None:
     if _keyring_enabled():
         try:
             keyring.delete_password(SERVICE_NAME, key)
-        except Exception:  # noqa: BLE001 - missing entry is fine
+        except KeyringError:  # missing entry is fine
             pass
     existing = _read_env_file()
     if key in existing:

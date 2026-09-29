@@ -372,7 +372,7 @@ def test_send_maps_transport_error_without_retry(monkeypatch, failure):
             raise failure
 
     session = Session()
-    monkeypatch.setattr(instance, "session", session)
+    monkeypatch.setattr(instance, "session", session, raising=False)
     with pytest.raises(TransportError) as caught:
         instance._send("POST", "matters")
     assert caught.value.unsafe is True
@@ -583,7 +583,7 @@ def _live_client_with_session(monkeypatch, response=None, failure=None):
             return response
 
     session = Session()
-    monkeypatch.setattr(instance, "session", session)
+    monkeypatch.setattr(instance, "session", session, raising=False)
     return instance, calls
 
 

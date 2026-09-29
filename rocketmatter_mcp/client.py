@@ -126,19 +126,51 @@ _HTTP_REASONS = {
 }
 
 
-def _vendor_http_error(status: int, headers=None) -> RuntimeError:
+_VENDOR_REASONS = {
+    "invalid_request": "The request is invalid.",
+    "validation_error": "Request validation failed.",
+    "invalid_parameter": "A request parameter is invalid.",
+    "service_unavailable": "The service is temporarily unavailable.",
+}
+
+
+def _vendor_reason(response, status):
+    fallback = _HTTP_REASONS.get(status, "The vendor rejected the request.")
+    if response is None:
+        return fallback
+    try:
+        data = response.json()
+    except ValueError:
+        return fallback
+    if isinstance(data, dict):
+        for source in (data, data.get("error")):
+            if isinstance(source, dict):
+                for key in ("code", "error_code", "error", "message", "detail"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.lower() in _VENDOR_REASONS:
+                        return _VENDOR_REASONS[value.lower()]
+    return fallback
+
+
+def _vendor_http_error(status: int, headers=None, response=None) -> RuntimeError:
     if status == 401:
         return AuthenticationError("Rocket Matter rejected or expired authorization")
     retry_after = None
     if status == 429 and headers is not None:
         value = headers.get("Retry-After", "")
-        if value.isascii() and value.isdecimal() and int(value) <= 86400:
+        if (
+            isinstance(value, str)
+            and len(value) <= 5
+            and value.isascii()
+            and value.isdecimal()
+            and 1 <= int(value) <= 86400
+        ):
             retry_after = str(int(value))
     if status == 404:
         return NotFoundError("The requested Rocket Matter record was not found")
     return VendorHTTPError(
         status,
-        _HTTP_REASONS.get(status, "The vendor rejected the request."),
+        _vendor_reason(response, status),
         retry_after,
     )
 
@@ -280,7 +312,7 @@ def exchange_code(
             "oauth_response_rejected reason=authorization_exchange_failed status=%s",
             resp.status_code,
         )
-        raise _vendor_http_error(resp.status_code, resp.headers)
+        raise _vendor_http_error(resp.status_code, resp.headers, resp)
     tokens = _token_record(resp.json())
     if save:
         _save_tokens(tokens)
@@ -344,11 +376,11 @@ class LCSClient:
                 "oauth_response_rejected reason=token_refresh_failed status=%s",
                 resp.status_code,
             )
-            if resp.status_code == 401:
+            if resp.status_code in (400, 401, 403):
                 raise AuthenticationError(
                     "Rocket Matter rejected or expired authorization"
                 )
-            raise _vendor_http_error(resp.status_code, resp.headers)
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         self._tokens = _token_record(resp.json(), self._tokens)
         _save_tokens(self._tokens)
 
@@ -402,7 +434,7 @@ class LCSClient:
             logger.warning(
                 "api_response_rejected reason=http_error status=%s", resp.status_code
             )
-            raise _vendor_http_error(resp.status_code, resp.headers)
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         if not resp.content:
             return {}
         return resp.json()
@@ -508,7 +540,7 @@ class LCSClient:
             resource,
             resp.status_code,
         )
-        raise _vendor_http_error(resp.status_code, resp.headers)
+        raise _vendor_http_error(resp.status_code, resp.headers, resp)
 
     def _create(self, resource: str, body: dict) -> dict:
         """POST to a collection -> the created record (201)."""
@@ -554,7 +586,7 @@ class LCSClient:
                 resource,
                 resp.status_code,
             )
-            raise _vendor_http_error(resp.status_code, resp.headers)
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         if not resp.content:
             return {"success": True}
         try:

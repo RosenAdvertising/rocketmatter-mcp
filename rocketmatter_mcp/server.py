@@ -17,7 +17,7 @@ from mcp.types import (
 )
 from pydantic import Field, ValidationError
 
-from rocketmatter_mcp.client import LCSClient
+from rocketmatter_mcp.client import LCSClient, _VENDOR_REASONS
 from rocketmatter_mcp.errors import (
     ArgumentValidationError,
     AuthenticationError,
@@ -69,7 +69,7 @@ class SafeMCPServer(MCPServer):
         except MCPError:
             raise
         except Exception as exc:
-            error = _safe_tool_error(exc)
+            error = _safe_tool_error(exc, self._tool_manager.get_tool(params.name))
             if error is None:
                 logger.error("tool_failed reason=unexpected")
                 registered_names = {
@@ -110,7 +110,7 @@ def _validation_shape(error_type: str, field: str) -> str:
     return "a value matching the documented input shape"
 
 
-def _safe_tool_error(exc: Exception) -> tuple[str, str] | None:
+def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
     chain: list[BaseException] = []
     current: BaseException | None = exc
     while current is not None and current not in chain:
@@ -146,9 +146,10 @@ def _safe_tool_error(exc: Exception) -> tuple[str, str] | None:
                 retry_after = error.retry_after
                 if (
                     isinstance(retry_after, str)
+                    and len(retry_after) <= 5
                     and retry_after.isascii()
                     and retry_after.isdecimal()
-                    and int(retry_after) <= 86400
+                    and 1 <= int(retry_after) <= 86400
                 ):
                     return (
                         "rate_limited",
@@ -164,6 +165,8 @@ def _safe_tool_error(exc: Exception) -> tuple[str, str] | None:
                 else 500
             )
             reason = _SAFE_HTTP_REASONS.get(status, "The vendor rejected the request.")
+            if error.reason in _VENDOR_REASONS.values():
+                reason = error.reason
             return "vendor_http", f"HTTP {status}: {reason}"
         if isinstance(error, NotFoundError):
             return "not_found", "The requested Rocket Matter record was not found."
@@ -183,24 +186,36 @@ def _safe_tool_error(exc: Exception) -> tuple[str, str] | None:
                 "This capability is not available in the Rocket Matter LCS /v1 API.",
             )
 
-    for error in chain:
-        if isinstance(error, ValidationError):
-            fields: list[tuple[str, str]] = []
-            for item in error.errors(include_input=False):
-                if item.get("type") == "extra_forbidden":
-                    fields.append(
-                        ("unexpected argument", "an argument documented by the tool")
-                    )
-                    continue
-                field = (
-                    ".".join(str(part) for part in item.get("loc", ())) or "argument"
+    # Only SDK input validation is a caller error. Pydantic failures inside a
+    # tool body are unexpected and must not expose vendor data or field keys.
+    if (
+        isinstance(exc, ToolError)
+        and not isinstance(exc, UnexpectedToolError)
+        and isinstance(exc.__cause__, ValidationError)
+        and tool is not None
+    ):
+        fields: list[tuple[str, str]] = []
+        properties = tool.parameters.get("properties", {})
+        for item in exc.__cause__.errors(include_input=False, include_url=False):
+            field = (item.get("loc") or ("argument",))[0]
+            if not isinstance(field, str) or field not in properties:
+                field, shape = (
+                    "unexpected argument",
+                    "an argument documented by the tool",
                 )
-                shape = _validation_shape(str(item.get("type", "")), field)
-                if (field, shape) not in fields:
-                    fields.append((field, shape))
-            if fields:
-                text = "; ".join(f"{field} must be {shape}" for field, shape in fields)
-                return "argument_validation", f"Invalid arguments: {text}."
+            else:
+                error_type = str(item.get("type", ""))
+                if error_type == "missing":
+                    shape = "a required " + properties[field].get(
+                        "type", "value matching the tool schema"
+                    )
+                else:
+                    shape = _validation_shape(error_type, field)
+            if (field, shape) not in fields:
+                fields.append((field, shape))
+        if fields:
+            text = "; ".join(f"{field} must be {shape}" for field, shape in fields)
+            return "argument_validation", f"Invalid arguments: {text}."
     # The only tool-authored ToolErrors currently describe fields_json syntax.
     # Keep their messages explicit and value-free, even if the SDK wraps them.
     fixed_tool_errors = {

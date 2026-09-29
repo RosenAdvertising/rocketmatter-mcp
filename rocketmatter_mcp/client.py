@@ -51,6 +51,14 @@ from urllib.parse import urlencode
 import requests
 
 from rocketmatter_mcp import credentials
+from rocketmatter_mcp.errors import (
+    ArgumentValidationError,
+    AuthenticationError,
+    CapabilityUnavailableError,
+    MissingCredentialsError,
+    NotFoundError,
+    VendorHTTPError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +115,33 @@ _EXPIRY_SKEW = 90
 # Per-request timeout (seconds) for data calls — a stalled /v1 call must not hang
 # the MCP tool indefinitely.
 _HTTP_TIMEOUT = 30
+
+_HTTP_REASONS = {
+    400: "The request did not pass vendor validation.",
+    403: "The vendor denied access; check the authorized account and permissions.",
+    404: "The requested record was not found.",
+    409: "The request conflicts with the current record state.",
+    422: "The request did not pass vendor validation.",
+    429: "The vendor rate limit was reached.",
+}
+
+
+def _vendor_http_error(status: int, headers=None) -> RuntimeError:
+    if status == 401:
+        return AuthenticationError("Rocket Matter rejected or expired authorization")
+    retry_after = None
+    if status == 429 and headers is not None:
+        value = headers.get("Retry-After", "")
+        if value.isascii() and value.isdecimal() and int(value) <= 86400:
+            retry_after = str(int(value))
+    if status == 404:
+        return NotFoundError("The requested Rocket Matter record was not found")
+    return VendorHTTPError(
+        status,
+        _HTTP_REASONS.get(status, "The vendor rejected the request."),
+        retry_after,
+    )
+
 
 # A JSON body carrying any of these keys (or ``success: false``) is an API
 # error/problem envelope, not a record. Used on the 404 detail path to reject an
@@ -175,7 +210,9 @@ def _token_record(data: dict, prev: dict | None = None) -> dict:
     access = data.get("access_token")
     if not access:
         logger.warning("oauth_response_rejected reason=missing_access_token")
-        raise RuntimeError("Token response had no access_token")
+        raise AuthenticationError(
+            "Rocket Matter authorization returned no access token"
+        )
     return {
         "access_token": access,
         "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
@@ -224,9 +261,8 @@ def exchange_code(
     client_secret = client_secret or os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
     if not (client_id and client_secret):
         logger.warning("oauth_request_rejected reason=missing_client_credentials")
-        raise RuntimeError(
-            "ROCKETMATTER_CLIENT_ID and ROCKETMATTER_CLIENT_SECRET are required to "
-            "exchange the authorization code. Run: rocketmatter-mcp-setup"
+        raise MissingCredentialsError(
+            ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
         )
     resp = requests.post(
         TOKEN_URL,
@@ -244,7 +280,7 @@ def exchange_code(
             "oauth_response_rejected reason=authorization_exchange_failed status=%s",
             resp.status_code,
         )
-        raise RuntimeError(f"Authorization-code exchange failed ({resp.status_code})")
+        raise _vendor_http_error(resp.status_code, resp.headers)
     tokens = _token_record(resp.json())
     if save:
         _save_tokens(tokens)
@@ -268,14 +304,10 @@ class LCSClient:
         self._tokens = _load_tokens()
         if not self._tokens.get("access_token"):
             logger.warning("client_initialization_rejected reason=missing_oauth_tokens")
-            raise RuntimeError(
-                "No Rocket Matter OAuth tokens found. Run: rocketmatter-mcp-setup"
-            )
+            raise MissingCredentialsError(("Rocket Matter OAuth tokens",))
         if not self._api_key:
             logger.warning("client_initialization_rejected reason=missing_api_key")
-            raise RuntimeError(
-                "ROCKETMATTER_API_KEY is not set. Run: rocketmatter-mcp-setup"
-            )
+            raise MissingCredentialsError(("ROCKETMATTER_API_KEY",))
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -289,12 +321,11 @@ class LCSClient:
         refresh_token = self._tokens.get("refresh_token")
         if not refresh_token:
             logger.warning("oauth_request_rejected reason=missing_refresh_token")
-            raise RuntimeError("No refresh_token cached. Run: rocketmatter-mcp-setup")
+            raise MissingCredentialsError(("Rocket Matter refresh token",))
         if not (self._client_id and self._client_secret):
             logger.warning("oauth_request_rejected reason=missing_client_credentials")
-            raise RuntimeError(
-                "ROCKETMATTER_CLIENT_ID / ROCKETMATTER_CLIENT_SECRET not set. "
-                "Run: rocketmatter-mcp-setup"
+            raise MissingCredentialsError(
+                ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
             )
         resp = requests.post(
             TOKEN_URL,
@@ -313,10 +344,11 @@ class LCSClient:
                 "oauth_response_rejected reason=token_refresh_failed status=%s",
                 resp.status_code,
             )
-            raise RuntimeError(
-                f"Token refresh failed ({resp.status_code}). "
-                "The refresh token may be revoked — re-run rocketmatter-mcp-setup."
-            )
+            if resp.status_code == 401:
+                raise AuthenticationError(
+                    "Rocket Matter rejected or expired authorization"
+                )
+            raise _vendor_http_error(resp.status_code, resp.headers)
         self._tokens = _token_record(resp.json(), self._tokens)
         _save_tokens(self._tokens)
 
@@ -370,7 +402,7 @@ class LCSClient:
             logger.warning(
                 "api_response_rejected reason=http_error status=%s", resp.status_code
             )
-            raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
+            raise _vendor_http_error(resp.status_code, resp.headers)
         if not resp.content:
             return {}
         return resp.json()
@@ -385,10 +417,13 @@ class LCSClient:
         """
         if page < 1:
             logger.warning("list_request_rejected reason=page_below_minimum")
-            raise ValueError("page must be at least 1")
+            raise ArgumentValidationError("page", "a whole number of at least 1")
         if not 1 <= page_size <= 200:
             logger.warning("list_request_rejected reason=page_size_out_of_range")
-            raise ValueError("page_size must be between 1 and 200")
+            raise ArgumentValidationError(
+                "page_size",
+                "a whole number greater than or equal to 1 and less than or equal to 200",
+            )
 
         query: dict = {"page": page, "pageSize": page_size}
         query.update({k: v for k, v in params.items() if v is not None})
@@ -428,7 +463,8 @@ class LCSClient:
     def _detail(self, resource: str, record_id) -> dict | None:
         """GET a single record by id via the RESTful item route.
 
-        Returns the record dict, or ``None`` if it does not exist. Tolerates a known
+        Returns the record dict. Raises :class:`NotFoundError` if it does not exist.
+        Tolerates a known
         server quirk where an existing record is occasionally returned with a 404
         status but a populated record body. The "found" path is strict: a 2xx with a
         dict body, or a 404 whose body is unmistakably the record — a truthy ``id``
@@ -466,13 +502,13 @@ class LCSClient:
             ):
                 return data
             logger.info("api_response_rejected reason=not_found resource=%s", resource)
-            return None
+            raise NotFoundError("The requested Rocket Matter record was not found")
         logger.warning(
             "api_response_rejected reason=http_error resource=%s status=%s",
             resource,
             resp.status_code,
         )
-        raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
+        raise _vendor_http_error(resp.status_code, resp.headers)
 
     def _create(self, resource: str, body: dict) -> dict:
         """POST to a collection -> the created record (201)."""
@@ -493,7 +529,9 @@ class LCSClient:
             logger.warning(
                 "update_request_rejected reason=record_not_found resource=%s", resource
             )
-            raise RuntimeError(f"{resource} record not found; cannot update.")
+            raise NotFoundError(
+                "The requested record was not found; it cannot be updated"
+            )
         merged = {**current, **fields}
         return self._json_or_raise(
             self._send(method, f"{resource}/{record_id}", body=merged)
@@ -516,7 +554,7 @@ class LCSClient:
                 resource,
                 resp.status_code,
             )
-            raise RuntimeError(f"RocketMatter /v1 error {resp.status_code}")
+            raise _vendor_http_error(resp.status_code, resp.headers)
         if not resp.content:
             return {"success": True}
         try:
@@ -537,9 +575,8 @@ class LCSClient:
                 resource,
                 resp.status_code,
             )
-            raise RuntimeError(
-                "RocketMatter /v1 delete reported failure despite HTTP "
-                f"{resp.status_code}"
+            raise VendorHTTPError(
+                resp.status_code, "The vendor reported that the delete failed."
             )
         return {"success": True}
 
@@ -552,7 +589,7 @@ class LCSClient:
         logger.warning(
             "capability_request_rejected reason=not_in_v1 capability=%s", capability
         )
-        return RuntimeError(
+        return CapabilityUnavailableError(
             f"'{capability}' is not available in the ProfitSolv LCS /v1 Integration "
             "API (the scoped-OAuth data API this MCP uses). It existed on the legacy "
             "/api/v2 session API, which trips Rocket Matter's single-session limit "
@@ -774,10 +811,9 @@ class LCSClient:
         """
         if not (matter_id or bank_id):
             logger.warning("list_request_rejected reason=missing_transaction_scope")
-            raise RuntimeError(
-                "list_transactions requires matter_id or bank_id — the LCS /v1 "
-                "transactions endpoint has no firm-wide listing, and /v1 exposes no "
-                "bank-enumeration endpoint (get a bankId from the Rocket Matter UI)."
+            raise ArgumentValidationError(
+                "matter_id or bank_id",
+                "provided so the transaction list has a matter or bank scope",
             )
         return self._list(
             "transactions",

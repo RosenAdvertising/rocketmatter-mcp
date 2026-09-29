@@ -6,12 +6,216 @@ import logging
 from typing import Annotated
 
 from mcp.server import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import Field
+from mcp.server.context import ServerRequestContext
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.shared.exceptions import MCPError
+from mcp.types import (
+    CallToolResult,
+    CallToolRequestParams,
+    InputRequiredResult,
+    TextContent,
+)
+from pydantic import Field, ValidationError
 
 from rocketmatter_mcp.client import LCSClient
+from rocketmatter_mcp.errors import (
+    ArgumentValidationError,
+    AuthenticationError,
+    CapabilityUnavailableError,
+    MissingCredentialsError,
+    NotFoundError,
+    VendorHTTPError,
+)
 
-mcp = MCPServer(
+_SAFE_HTTP_REASONS = {
+    400: "The request did not pass vendor validation.",
+    403: "The vendor denied access; check the authorized account and permissions.",
+    404: "The requested record was not found.",
+    409: "The request conflicts with the current record state.",
+    422: "The request did not pass vendor validation.",
+    429: "Rate limit reached.",
+}
+_SAFE_ARGUMENT_SHAPES = {
+    ("page", "a whole number of at least 1"),
+    (
+        "page_size",
+        "a whole number greater than or equal to 1 and less than or equal to 200",
+    ),
+    (
+        "matter_id or bank_id",
+        "provided so the transaction list has a matter or bank scope",
+    ),
+}
+
+
+class SafeMCPServer(MCPServer):
+    """Return classified, sanitized failures and suppress unsafe SDK logging."""
+
+    async def _handle_call_tool(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult | InputRequiredResult:
+        from mcp.server.mcpserver.context import Context
+
+        context = Context(
+            request_context=ctx,
+            mcp_server=self,
+            input_params=params,
+            subscriptions=self._subscriptions,
+        )
+        try:
+            return await self.call_tool(params.name, params.arguments or {}, context)
+        except MCPError:
+            raise
+        except Exception as exc:
+            error = _safe_tool_error(exc)
+            if error is None:
+                logger.error("tool_failed reason=unexpected")
+                registered_names = {
+                    tool.name for tool in self._tool_manager.list_tools()
+                }
+                if params.name in registered_names:
+                    message = f"Error executing tool {params.name}"
+                else:
+                    message = (
+                        "Unexpected error while executing tool. Check server logs."
+                    )
+            else:
+                logger.info("tool_failed reason=%s", error[0])
+                message = error[1]
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)], is_error=True
+            )
+
+
+def _validation_shape(error_type: str, field: str) -> str:
+    if field == "page":
+        return "a whole number of at least 1"
+    if field == "page_size":
+        return "a whole number greater than or equal to 1 and less than or equal to 200"
+    if error_type in {"int_parsing", "int_type"}:
+        return "a whole number"
+    if error_type in {"string_type", "string_sub_type"}:
+        return "text"
+    if error_type in {"bool_parsing", "bool_type"}:
+        return "true or false"
+    if error_type in {
+        "greater_than_equal",
+        "less_than_equal",
+        "greater_than",
+        "less_than",
+    }:
+        return "a whole number within the documented range"
+    return "a value matching the documented input shape"
+
+
+def _safe_tool_error(exc: Exception) -> tuple[str, str] | None:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__
+
+    for error in chain:
+        if isinstance(error, MissingCredentialsError):
+            known_names = {
+                "ROCKETMATTER_API_KEY",
+                "ROCKETMATTER_CLIENT_ID",
+                "ROCKETMATTER_CLIENT_SECRET",
+            }
+            if not error.variables or any(
+                name not in known_names for name in error.variables
+            ):
+                return (
+                    "missing_credentials",
+                    "Rocket Matter credentials are missing. Run: rocketmatter-mcp-setup",
+                )
+            names = " and ".join(error.variables)
+            return (
+                "missing_credentials",
+                f"Missing {names}. Run: rocketmatter-mcp-setup",
+            )
+        if isinstance(error, AuthenticationError):
+            return (
+                "authentication_rejected",
+                "Rocket Matter authorization was rejected or expired. Re-authorize with rocketmatter-mcp-setup.",
+            )
+        if isinstance(error, VendorHTTPError):
+            if error.status == 429:
+                retry_after = error.retry_after
+                if (
+                    isinstance(retry_after, str)
+                    and retry_after.isascii()
+                    and retry_after.isdecimal()
+                    and int(retry_after) <= 86400
+                ):
+                    return (
+                        "rate_limited",
+                        f"HTTP 429: Rate limit reached. Retry after {int(retry_after)} seconds.",
+                    )
+                return (
+                    "rate_limited",
+                    "HTTP 429: Rate limit reached. Wait briefly, then retry.",
+                )
+            status = (
+                error.status
+                if isinstance(error.status, int) and 100 <= error.status <= 599
+                else 500
+            )
+            reason = _SAFE_HTTP_REASONS.get(status, "The vendor rejected the request.")
+            return "vendor_http", f"HTTP {status}: {reason}"
+        if isinstance(error, NotFoundError):
+            return "not_found", "The requested Rocket Matter record was not found."
+        if isinstance(error, ArgumentValidationError):
+            if (error.argument, error.expected) in _SAFE_ARGUMENT_SHAPES:
+                return (
+                    "argument_validation",
+                    f"Invalid argument {error.argument}: expected {error.expected}.",
+                )
+            return (
+                "argument_validation",
+                "Invalid argument: expected a value matching the documented input shape.",
+            )
+        if isinstance(error, CapabilityUnavailableError):
+            return (
+                "capability_unavailable",
+                "This capability is not available in the Rocket Matter LCS /v1 API.",
+            )
+
+    for error in chain:
+        if isinstance(error, ValidationError):
+            fields: list[tuple[str, str]] = []
+            for item in error.errors(include_input=False):
+                if item.get("type") == "extra_forbidden":
+                    fields.append(
+                        ("unexpected argument", "an argument documented by the tool")
+                    )
+                    continue
+                field = (
+                    ".".join(str(part) for part in item.get("loc", ())) or "argument"
+                )
+                shape = _validation_shape(str(item.get("type", "")), field)
+                if (field, shape) not in fields:
+                    fields.append((field, shape))
+            if fields:
+                text = "; ".join(f"{field} must be {shape}" for field, shape in fields)
+                return "argument_validation", f"Invalid arguments: {text}."
+    # The only tool-authored ToolErrors currently describe fields_json syntax.
+    # Keep their messages explicit and value-free, even if the SDK wraps them.
+    fixed_tool_errors = {
+        "Invalid fields_json: malformed JSON",
+        "fields_json must be a JSON object",
+    }
+    for error in chain:
+        if isinstance(error, ToolError) and not isinstance(error, UnexpectedToolError):
+            message = str(error)
+            if message in fixed_tool_errors:
+                return "argument_validation", message
+    return None
+
+
+mcp = SafeMCPServer(
     "rocketmatter",
     instructions=(
         "Rocketmatter legal practice management via the ProfitSolv LCS /v1 Integration "

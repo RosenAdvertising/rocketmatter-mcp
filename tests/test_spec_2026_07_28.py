@@ -267,6 +267,25 @@ def test_resource_read_cache_hints_and_not_found_error(monkeypatch) -> None:
     assert missing.json()["error"]["code"] == -32602
 
 
+def test_resource_read_failure_uses_sanitized_resource_error(
+    monkeypatch, caplog
+) -> None:
+    from rocketmatter_mcp.errors import VendorHTTPError
+
+    class FailedClient:
+        def list_users(self, page: int, page_size: int) -> dict[str, Any]:
+            raise VendorHTTPError(403, "sensitive vendor detail")
+
+    monkeypatch.setattr(server, "_c", FailedClient)
+    response = asyncio.run(
+        _post_modern("resources/read", {"uri": "rocketmatter://users"})
+    )
+    assert response.status_code == 200
+    assert "Rocket Matter access denied" in response.text
+    assert "sensitive vendor detail" not in response.text
+    assert "sensitive vendor detail" not in caplog.text
+
+
 def test_modern_tool_errors_are_complete_and_pii_free(monkeypatch, caplog) -> None:
     pii_sentinel = "person-name-and-email@example.invalid"
 

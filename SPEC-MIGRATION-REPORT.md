@@ -47,10 +47,12 @@ uv lock --check --offline
 The tests use mocked vendor behavior and in-process protocol transports; they
 do not establish live vendor or deployed transport behavior.
 
-## Open product decision
+## Error handling
 
-MCP 2.2.0 masks exception messages other than `ToolError` and `ResourceError`
-from tool clients. Retaining that masking limits information leakage; explicitly
-safe `ToolError` messages can give clients more actionable feedback. Toby should
-decide whether any other error paths warrant safe client-facing messages.
-Existing exception handling is unchanged by this documentation cleanup.
+Expected failures are returned to tool clients as sanitized MCP tool errors.
+Unexpected failures are masked with a generic message. Read timeouts may be
+retried; after a timeout or connection failure on a write, the operation outcome
+is unknown and must be checked before another attempt. HTTP 403 indicates that
+the connected account lacks permission for the action, or that authorization has
+expired; setup can be rerun when authorization has expired. Resource reads use
+the SDK's resource error boundary and do not return raw vendor response bodies.

@@ -21,11 +21,11 @@ return a paginated envelope ``{page,pageSize,totalCount,items,totalPages}``
 (``documents`` returns a bare list); detail / create / update / delete use the
 RESTful item route ``/v1/{resource}/{id}``.
 
-Verified live 2026-06-27 against Toby's dev2 firm 44430: OAuth refresh; reads on
+Previously exercised against a development account: OAuth refresh; reads on
 clients/contacts/users/matters/invoices/payments/expense/time-entries/documents;
 and create→read→update→delete round-trips for client, matter, time-entry, and
-expense (each self-cleaned). Server-side LIST filters are forwarded ONLY where /v1
-actually honors them (verified live): clients ``name``/``displayName``, matters
+expense (each self-cleaned). Server-side LIST filters are forwarded only where /v1
+honors them: clients ``name``/``displayName``, matters
 ``clientId``/``matterName``, time-entries ``matterId``, transactions/codes
 ``matterId`` (required). /v1 SILENTLY IGNORES filters elsewhere (expense ignores
 ``matterId``; contacts/users/invoices/payments/documents honor none), so those
@@ -37,8 +37,7 @@ accounts-payable, lookups, document actions, tasks, timers, calendar, tags, trus
 rates, firm roles, tax/discount, phone messages, internal chat, workflow, reports,
 recurring billing, matter templates, court rules) are kept as **fail-loud stubs**
 via :meth:`_not_in_v1` — they raise a clear "not in the LCS /v1 API" error instead
-of silently returning nothing, pending Toby's keep/drop call. See the module
-``COVERAGE_DELTA`` list and the wiki page ``Rocketmatter MCP``.
+of silently returning nothing. See the module ``COVERAGE_DELTA`` list.
 """
 
 import json
@@ -46,7 +45,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -57,6 +56,7 @@ from rocketmatter_mcp.errors import (
     CapabilityUnavailableError,
     MissingCredentialsError,
     NotFoundError,
+    TransportError,
     VendorHTTPError,
 )
 
@@ -118,7 +118,7 @@ _HTTP_TIMEOUT = 30
 
 _HTTP_REASONS = {
     400: "The request did not pass vendor validation.",
-    403: "The vendor denied access; check the authorized account and permissions.",
+    403: "access denied",
     404: "The requested record was not found.",
     409: "The request conflicts with the current record state.",
     422: "The request did not pass vendor validation.",
@@ -168,9 +168,14 @@ def _vendor_http_error(status: int, headers=None, response=None) -> RuntimeError
             retry_after = str(int(value))
     if status == 404:
         return NotFoundError("The requested Rocket Matter record was not found")
+    reason = (
+        "Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so)."
+        if status == 403
+        else _vendor_reason(response, status)
+    )
     return VendorHTTPError(
         status,
-        _vendor_reason(response, status),
+        reason,
         retry_after,
     )
 
@@ -192,7 +197,7 @@ _ERROR_ENVELOPE_KEYS = (
 )
 
 # Tools whose capability the LCS /v1 API does not expose (kept as fail-loud stubs).
-# Surfaced for Toby's keep/drop call — NOT silently dropped.
+# Capabilities not exposed by the current LCS API.
 COVERAGE_DELTA = [
     "list_timekeepers (billable-time summary)",
     "get_firm_summary",
@@ -296,17 +301,20 @@ def exchange_code(
         raise MissingCredentialsError(
             ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
         )
-    resp = requests.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "code": code,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        raise TransportError("POST") from exc
     if not resp.ok:
         logger.warning(
             "oauth_response_rejected reason=authorization_exchange_failed status=%s",
@@ -359,24 +367,27 @@ class LCSClient:
             raise MissingCredentialsError(
                 ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
             )
-        resp = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "refresh_token": refresh_token,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "refresh_token": refresh_token,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise TransportError("POST") from exc
         if not resp.ok:
             # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure -- only the HTTP status is logged; no token, response body, or credential is included.
             logger.warning(
                 "oauth_response_rejected reason=token_refresh_failed status=%s",
                 resp.status_code,
             )
-            if resp.status_code in (400, 401, 403):
+            if resp.status_code in (400, 401):
                 raise AuthenticationError(
                     "Rocket Matter rejected or expired authorization"
                 )
@@ -407,16 +418,7 @@ class LCSClient:
         if not self._token_valid():
             self._refresh()
         url = self._url(path)
-        resp = self.session.request(
-            method,
-            url,
-            params=params,
-            json=body,
-            headers=self._headers(),
-            timeout=_HTTP_TIMEOUT,
-        )
-        if resp.status_code == 401:
-            self._refresh()
+        try:
             resp = self.session.request(
                 method,
                 url,
@@ -425,6 +427,21 @@ class LCSClient:
                 headers=self._headers(),
                 timeout=_HTTP_TIMEOUT,
             )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise TransportError(method) from exc
+        if resp.status_code == 401:
+            self._refresh()
+            try:
+                resp = self.session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=body,
+                    headers=self._headers(),
+                    timeout=_HTTP_TIMEOUT,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                raise TransportError(method) from exc
         return resp
 
     @staticmethod
@@ -437,7 +454,22 @@ class LCSClient:
             raise _vendor_http_error(resp.status_code, resp.headers, resp)
         if not resp.content:
             return {}
-        return resp.json()
+        data = resp.json()
+        LCSClient._reject_failed_response(data, resp.status_code)
+        return data
+
+    @staticmethod
+    def _reject_failed_response(data, status: int) -> None:
+        if isinstance(data, dict) and (
+            data.get("success") is False
+            or (
+                data.get("success") is None
+                and (data.get("error") or data.get("errors"))
+            )
+        ):
+            raise VendorHTTPError(
+                status, "The vendor reported that the request failed."
+            )
 
     # ── Generic resource operations ──────────────────────────────────────────
 
@@ -507,7 +539,7 @@ class LCSClient:
         corrupt data). The bias is deliberate: a real record misjudged not-found fails
         loudly in :meth:`_update`; the inverse corrupts.
         """
-        resp = self._send("GET", f"{resource}/{record_id}")
+        resp = self._send("GET", f"{resource}/{quote(str(record_id), safe='')}")
         data = None
         if resp.content:
             try:
@@ -515,6 +547,7 @@ class LCSClient:
             except ValueError:
                 data = None
         if resp.ok:
+            self._reject_failed_response(data, resp.status_code)
             if isinstance(data, dict):
                 return data
             logger.warning(
@@ -566,7 +599,9 @@ class LCSClient:
             )
         merged = {**current, **fields}
         return self._json_or_raise(
-            self._send(method, f"{resource}/{record_id}", body=merged)
+            self._send(
+                method, f"{resource}/{quote(str(record_id), safe='')}", body=merged
+            )
         )
 
     def _delete(self, resource: str, record_id) -> dict:
@@ -576,10 +611,10 @@ class LCSClient:
         routes instead return a 200 whose BODY reports the real outcome — a
         ``{"success": false, ...}`` (or an ``error``/``errors`` payload) there is a
         FAILURE despite the 2xx. The body is read so that is surfaced as an error
-        (Rule 12 — never a false success) rather than reported as deleted; only a body
+        rather than reported as deleted; only a body
         that does not contradict success returns ``{"success": True}``.
         """
-        resp = self._send("DELETE", f"{resource}/{record_id}")
+        resp = self._send("DELETE", f"{resource}/{quote(str(record_id), safe='')}")
         if not resp.ok:
             logger.warning(
                 "delete_response_rejected reason=http_error resource=%s status=%s",
@@ -616,7 +651,7 @@ class LCSClient:
         """Standard fail-loud error for a capability the LCS /v1 API lacks.
 
         Never returns a false success — the tool raises so the gap is visible
-        (Rule 12). Kept registered for Toby's keep/drop call; see ``COVERAGE_DELTA``.
+        Kept registered to report unavailable capabilities; see ``COVERAGE_DELTA``.
         """
         logger.warning(
             "capability_request_rejected reason=not_in_v1 capability=%s", capability
@@ -786,7 +821,7 @@ class LCSClient:
 
     def create_invoice(self, **fields) -> dict:
         """Create an invoice (``POST /v1/invoices``). The required body has not been
-        exercised live (the dev firm has no billable items); the caller supplies the
+        exercised against a development account (which had no billable items); the caller supplies the
         fields and the API's 400 validation names any that are missing."""
         return self._create("invoices", fields)
 

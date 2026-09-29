@@ -12,6 +12,12 @@ class AuthenticationError(RuntimeError):
     pass
 
 
+class TransportError(RuntimeError):
+    def __init__(self, method: str):
+        self.unsafe = method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        super().__init__("transport failure")
+
+
 class VendorHTTPError(RuntimeError):
     def __init__(self, status: int, reason: str, retry_after: str | None = None):
         self.status = status

@@ -18,6 +18,7 @@ from rocketmatter_mcp.errors import (
     AuthenticationError,
     MissingCredentialsError,
     NotFoundError,
+    TransportError,
     VendorHTTPError,
 )
 from rocketmatter_mcp.client import LCSClient
@@ -56,7 +57,7 @@ def test_missing_credentials_is_actionable_at_sdk_boundary(monkeypatch):
         )
     )
     assert _text(result) == (
-        "Missing ROCKETMATTER_API_KEY. Run: rocketmatter-mcp-setup"
+        "Missing ROCKETMATTER_API_KEY. Run rocketmatter-mcp-setup, then restart the MCP server."
     )
 
 
@@ -75,13 +76,13 @@ def test_vendor_error_uses_status_and_safe_allowlisted_reason(monkeypatch):
             _FakeClient(
                 VendorHTTPError(
                     403,
-                    "The vendor denied access; check the authorized account and permissions.",
+                    "Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so).",
                 )
             ),
         )
     )
     assert _text(result) == (
-        "HTTP 403: The vendor denied access; check the authorized account and permissions."
+        "HTTP 403: Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so)."
     )
 
 
@@ -318,3 +319,336 @@ def test_vendor_404_with_real_record_remains_success(monkeypatch):
         "id": "example-record",
         "name": "Example",
     }
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        (
+            "GET",
+            "The Rocket Matter read could not complete because of a timeout or connection failure. You may retry.",
+        ),
+        (
+            "POST",
+            "The operation outcome is unknown because the connection failed. Check whether it completed before retrying.",
+        ),
+        (
+            "PUT",
+            "The operation outcome is unknown because the connection failed. Check whether it completed before retrying.",
+        ),
+        (
+            "DELETE",
+            "The operation outcome is unknown because the connection failed. Check whether it completed before retrying.",
+        ),
+    ],
+)
+def test_transport_failure_dispatch_is_safe_and_method_aware(
+    monkeypatch, method, expected
+):
+    class FailingClient:
+        def list_matters(self, **_kwargs):
+            raise TransportError(method)
+
+    result = asyncio.run(_call(monkeypatch, FailingClient()))
+    assert _text(result) == expected
+
+
+@pytest.mark.parametrize(
+    "failure", [requests.Timeout("private-url"), requests.ConnectionError("secret")]
+)
+def test_send_maps_transport_error_without_retry(monkeypatch, failure):
+    from rocketmatter_mcp.errors import TransportError
+
+    instance = object.__new__(LCSClient)
+    instance._token_valid = lambda: True
+    instance._headers = lambda: {}
+
+    class Session:
+        calls = 0
+
+        def request(self, *_args, **kwargs):
+            self.calls += 1
+            assert kwargs["timeout"] == 30
+            raise failure
+
+    session = Session()
+    monkeypatch.setattr(instance, "session", session)
+    with pytest.raises(TransportError) as caught:
+        instance._send("POST", "matters")
+    assert caught.value.unsafe is True
+    assert session.calls == 1
+
+
+def test_id_path_segment_is_escaped_before_request_preparation(monkeypatch):
+    instance = object.__new__(LCSClient)
+    seen = {}
+
+    class Response:
+        status_code = 200
+        ok = True
+        content = b'{"id":"../x"}'
+
+        @staticmethod
+        def json():
+            return {"id": "../x"}
+
+    def send(method, path, **_kwargs):
+        seen["path"] = path
+        return Response()
+
+    monkeypatch.setattr(instance, "_send", send)
+    instance._detail("matters", "../x")
+    assert seen["path"] == "matters/..%2Fx"
+    assert instance._url(seen["path"]).endswith("/v1/matters/..%2Fx")
+
+
+def test_all_oauth_posts_have_explicit_timeout(monkeypatch):
+    from rocketmatter_mcp import client as client_module
+
+    seen = []
+
+    class Response:
+        ok = True
+        status_code = 200
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"access_token": "fake", "refresh_token": "fake"}
+
+    def post(*_args, **kwargs):
+        seen.append(kwargs["timeout"])
+        return Response()
+
+    monkeypatch.setattr(client_module.requests, "post", post)
+    client_module.exchange_code(
+        "fake-code", client_id="id", client_secret="secret", save=False
+    )
+    instance = object.__new__(LCSClient)
+    instance._tokens = {"refresh_token": "fake"}
+    instance._client_id = "id"
+    instance._client_secret = "secret"
+    monkeypatch.setattr(client_module, "_save_tokens", lambda _tokens: None)
+    instance._refresh()
+    assert seen == [30, 30]
+
+
+def test_setup_eof_exits_cleanly_and_does_not_request_network(monkeypatch, capsys):
+    from rocketmatter_mcp.setup import oauth_flow
+
+    monkeypatch.setattr(oauth_flow, "_capture", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        oauth_flow.sys, "exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
+    )
+    with pytest.raises(SystemExit) as caught:
+        oauth_flow.main()
+    assert caught.value.code == 1
+    assert "all required" in capsys.readouterr().out
+
+
+def test_setup_prompt_eof_is_actionable_without_traceback(monkeypatch, capsys):
+    from rocketmatter_mcp.setup import oauth_flow
+
+    monkeypatch.delenv("ROCKETMATTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError())
+    )
+    monkeypatch.setattr(
+        oauth_flow.getpass, "getpass", lambda _prompt: (_ for _ in ()).throw(EOFError())
+    )
+    with pytest.raises(SystemExit) as caught:
+        oauth_flow.main()
+    output = capsys.readouterr().out
+    assert caught.value.code == 1
+    assert "all required" in output
+    assert "Traceback" not in output
+
+
+def test_setup_authorization_code_eof_exits_without_network(monkeypatch, capsys):
+    from rocketmatter_mcp.setup import oauth_flow
+
+    monkeypatch.setattr(oauth_flow, "_capture", lambda *_args, **_kwargs: "fake")
+    monkeypatch.setattr(oauth_flow.credentials, "set_secret", lambda *_args: "file")
+    monkeypatch.setattr(oauth_flow.credentials, "ENV_FILE", "/tmp/fake.env")
+    monkeypatch.setattr(
+        oauth_flow, "build_authorize_url", lambda *_args: "https://example.invalid"
+    )
+    monkeypatch.delenv("ROCKETMATTER_OAUTH_CODE", raising=False)
+    monkeypatch.setattr(oauth_flow.sys, "argv", ["rocketmatter-mcp-setup"])
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError())
+    )
+    with pytest.raises(SystemExit) as caught:
+        oauth_flow.main()
+    output = capsys.readouterr().out
+    assert caught.value.code == 1
+    assert "no authorization code" in output
+    assert "Traceback" not in output
+
+
+def test_setup_fake_bad_code_exits_safely(monkeypatch, capsys):
+    from rocketmatter_mcp import client as client_module
+    from rocketmatter_mcp.setup import oauth_flow
+
+    class Response:
+        ok = False
+        status_code = 400
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"error": "invalid_grant", "message": "private vendor detail"}
+
+    monkeypatch.setattr(client_module.requests, "post", lambda *_a, **_k: Response())
+    monkeypatch.setattr(
+        oauth_flow, "_capture", lambda name, *_a, **_k: "fake" if name != "" else ""
+    )
+    monkeypatch.setattr(oauth_flow.credentials, "set_secret", lambda *_a: "file")
+    monkeypatch.setattr(oauth_flow.credentials, "ENV_FILE", "/tmp/fake.env")
+    monkeypatch.setattr(
+        oauth_flow, "build_authorize_url", lambda *_a: "https://example.invalid"
+    )
+    monkeypatch.setenv("ROCKETMATTER_OAUTH_CODE", "fake-code")
+    monkeypatch.setattr(oauth_flow.sys, "argv", ["rocketmatter-mcp-setup"])
+    with pytest.raises(SystemExit) as caught:
+        oauth_flow.main()
+    output = capsys.readouterr().out
+    assert caught.value.code == 1
+    assert "Authorization failed" in output
+    assert "private vendor detail" not in output
+    assert "Traceback" not in output
+
+
+def test_verify_no_credentials_exits_with_safe_action(monkeypatch, capsys):
+    from rocketmatter_mcp.setup import verify
+
+    monkeypatch.setattr(
+        verify,
+        "LCSClient",
+        lambda: (_ for _ in ()).throw(
+            MissingCredentialsError(("ROCKETMATTER_API_KEY",))
+        ),
+    )
+    with pytest.raises(SystemExit) as caught:
+        verify.main()
+    out = capsys.readouterr().out
+    assert caught.value.code == 1
+    assert "rocketmatter-mcp-setup" in out
+    assert "Traceback" not in out
+
+
+def test_verify_fake_bad_credentials_exits_with_safe_action(monkeypatch, capsys):
+    from rocketmatter_mcp.setup import verify
+
+    class BadCredentialsClient:
+        def list_users(self, **_kwargs):
+            raise AuthenticationError("private vendor payload")
+
+    monkeypatch.setattr(verify, "LCSClient", BadCredentialsClient)
+    with pytest.raises(SystemExit) as caught:
+        verify.main()
+    out = capsys.readouterr().out
+    assert caught.value.code == 1
+    assert "rocketmatter-mcp-setup" in out
+    assert "private vendor payload" not in out
+    assert "Traceback" not in out
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Rocket Matter access denied: private@example.invalid",
+        "The operation is not permitted.",
+    ],
+)
+def test_forbidden_reason_cannot_replace_permission_guidance(monkeypatch, reason):
+    result = asyncio.run(_call(monkeypatch, _FakeClient(VendorHTTPError(403, reason))))
+    assert (
+        _text(result)
+        == "HTTP 403: Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so)."
+    )
+
+
+def _live_client_with_session(monkeypatch, response=None, failure=None):
+    instance = object.__new__(LCSClient)
+    monkeypatch.setattr(instance, "_token_valid", lambda: True)
+    monkeypatch.setattr(instance, "_headers", lambda: {})
+    calls = []
+
+    class Session:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if failure is not None:
+                raise failure
+            return response
+
+    session = Session()
+    monkeypatch.setattr(instance, "session", session)
+    return instance, calls
+
+
+@pytest.mark.parametrize("error_type", [requests.Timeout, requests.ConnectionError])
+@pytest.mark.parametrize(
+    ("tool", "arguments", "method"),
+    [
+        ("list_matters", {}, "GET"),
+        ("create_matter", {"fields_json": "{}"}, "POST"),
+        ("delete_matter", {"matter_id": "../x"}, "DELETE"),
+    ],
+)
+def test_real_request_failure_reaches_sdk_with_method_safe_guidance(
+    monkeypatch, error_type, tool, arguments, method
+):
+    client, calls = _live_client_with_session(
+        monkeypatch, failure=error_type("private-url")
+    )
+    result = asyncio.run(_call(monkeypatch, client, tool, arguments))
+    expected = (
+        "The Rocket Matter read could not complete because of a timeout or connection failure. You may retry."
+        if method == "GET"
+        else "The operation outcome is unknown because the connection failed. Check whether it completed before retrying."
+    )
+    assert _text(result) == expected
+    assert "retry shortly" not in _text(result).lower()
+    assert len(calls) == 1 and calls[0][0] == method
+    assert calls[0][2]["timeout"] == 30
+    if method == "DELETE":
+        assert (
+            requests.Request(method, calls[0][1]).prepare().path_url
+            == "/v1/matters/..%2Fx"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            403,
+            {"error": "private"},
+            "HTTP 403: Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so).",
+        ),
+        (
+            429,
+            {"error": "private"},
+            "HTTP 429: Rate limit reached. Retry after 120 seconds.",
+        ),
+        (
+            200,
+            {"success": False, "message": "private"},
+            "HTTP 200: The vendor reported that the request failed.",
+        ),
+    ],
+)
+def test_real_http_failures_are_errors_and_do_not_sleep(
+    monkeypatch, status, body, expected
+):
+    response = requests.Response()
+    response.status_code = status
+    response._content = json.dumps(body).encode()
+    response.headers["Retry-After"] = "120"
+    client, _ = _live_client_with_session(monkeypatch, response=response)
+    sleeps = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    result = asyncio.run(_call(monkeypatch, client))
+    assert _text(result) == expected
+    assert sleeps == []

@@ -35,7 +35,10 @@ def _capture(name: str, prompt: str, secret: bool = False) -> str:
     val = os.environ.get(name, "").strip()
     if val:
         return val
-    val = (getpass.getpass(prompt) if secret else input(prompt)).strip()
+    try:
+        val = (getpass.getpass(prompt) if secret else input(prompt)).strip()
+    except EOFError:
+        return ""
     return val
 
 
@@ -102,15 +105,22 @@ def main():
         if arg.startswith("--code="):
             code = arg.split("=", 1)[1].strip()
     if not code:
-        code = input("Paste the authorization code here: ").strip()
+        try:
+            code = input("Paste the authorization code here: ").strip()
+        except EOFError:
+            code = ""
     if not code:
-        print("Error: no authorization code provided.")
+        print(
+            "Error: no authorization code provided. Re-run rocketmatter-mcp-setup with --code or ROCKETMATTER_OAUTH_CODE."
+        )
         sys.exit(1)
 
     try:
         tokens = exchange_code(code, redirect_uri, client_id, client_secret)
-    except Exception as e:  # noqa: BLE001
-        print(f"\n✗ Authorization failed ({type(e).__name__}).")
+    except Exception:  # noqa: BLE001
+        print(
+            "\n✗ Authorization failed. Check the app credentials and authorization code."
+        )
         print(
             "Re-run rocketmatter-mcp-setup and try a fresh code (codes are single-use)."
         )

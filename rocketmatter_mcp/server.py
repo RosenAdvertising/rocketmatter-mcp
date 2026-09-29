@@ -3,11 +3,15 @@
 
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 from mcp.server import MCPServer
 from mcp.server.context import ServerRequestContext
-from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.server.mcpserver.exceptions import (
+    ResourceError,
+    ToolError,
+    UnexpectedToolError,
+)
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolResult,
@@ -24,12 +28,14 @@ from rocketmatter_mcp.errors import (
     CapabilityUnavailableError,
     MissingCredentialsError,
     NotFoundError,
+    TransportError,
     VendorHTTPError,
 )
 
 _SAFE_HTTP_REASONS = {
+    200: "The vendor reported that the request failed.",
     400: "The request did not pass vendor validation.",
-    403: "The vendor denied access; check the authorized account and permissions.",
+    403: "Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so).",
     404: "The requested record was not found.",
     409: "The request conflicts with the current record state.",
     422: "The request did not pass vendor validation.",
@@ -129,17 +135,27 @@ def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
             ):
                 return (
                     "missing_credentials",
-                    "Rocket Matter credentials are missing. Run: rocketmatter-mcp-setup",
+                    "Rocket Matter credentials are missing. Run rocketmatter-mcp-setup, then restart the MCP server.",
                 )
             names = " and ".join(error.variables)
             return (
                 "missing_credentials",
-                f"Missing {names}. Run: rocketmatter-mcp-setup",
+                f"Missing {names}. Run rocketmatter-mcp-setup, then restart the MCP server.",
             )
         if isinstance(error, AuthenticationError):
             return (
                 "authentication_rejected",
                 "Rocket Matter authorization was rejected or expired. Re-authorize with rocketmatter-mcp-setup.",
+            )
+        if isinstance(error, TransportError):
+            if error.unsafe:
+                return (
+                    "transport_failure",
+                    "The operation outcome is unknown because the connection failed. Check whether it completed before retrying.",
+                )
+            return (
+                "transport_failure",
+                "The Rocket Matter read could not complete because of a timeout or connection failure. You may retry.",
             )
         if isinstance(error, VendorHTTPError):
             if error.status == 429:
@@ -165,7 +181,7 @@ def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
                 else 500
             )
             reason = _SAFE_HTTP_REASONS.get(status, "The vendor rejected the request.")
-            if error.reason in _VENDOR_REASONS.values():
+            if status != 403 and error.reason in _VENDOR_REASONS.values():
                 reason = error.reason
             return "vendor_http", f"HTTP {status}: {reason}"
         if isinstance(error, NotFoundError):
@@ -775,7 +791,7 @@ def get_activity_codes(matter_id: str) -> str:
 
 # ── Lookups [Not in LCS /v1] ─────────────────────────────────────────────────────
 # None of the legacy lookup endpoints exist in the LCS /v1 API; every tool below
-# fails loudly. Kept registered for Toby's keep/drop call (see COVERAGE_DELTA).
+# fails loudly. Kept registered to report unavailable capabilities (see COVERAGE_DELTA).
 
 
 @mcp.tool()
@@ -882,7 +898,7 @@ def get_hard_cost_expense_lookups(matter_id: str | None = None) -> str:
 
 # ── Accounts Payable [Not in LCS /v1] ────────────────────────────────────────────
 # No AP endpoints exist in the LCS /v1 API; every tool below fails loudly. Kept
-# registered for Toby's keep/drop call (see COVERAGE_DELTA).
+# registered to report unavailable capabilities (see COVERAGE_DELTA).
 
 
 @mcp.tool()
@@ -965,13 +981,26 @@ def update_ap_vendor(vendor_id: str, fields_json: str) -> str:
 @mcp.resource("rocketmatter://users", mime_type="application/json")
 def users_resource() -> str:
     """All firm users / timekeepers (email, roles, default rate, status)."""
-    return json.dumps(_c().list_users(page=1, page_size=100), indent=2)
+    try:
+        return json.dumps(_c().list_users(page=1, page_size=100), indent=2)
+    except Exception as exc:  # noqa: BLE001
+        _raise_safe_resource_error(exc)
 
 
 @mcp.resource("rocketmatter://clients", mime_type="application/json")
 def clients_resource() -> str:
     """The firm's clients (first page) — names, balances, and contact details."""
-    return json.dumps(_c().list_clients(page=1, page_size=100), indent=2)
+    try:
+        return json.dumps(_c().list_clients(page=1, page_size=100), indent=2)
+    except Exception as exc:  # noqa: BLE001
+        _raise_safe_resource_error(exc)
+
+
+def _raise_safe_resource_error(exc: Exception) -> NoReturn:
+    safe = _safe_tool_error(exc)
+    logger.warning("resource_read_failed reason=%s", safe[0] if safe else "unexpected")
+    message = safe[1] if safe else "Unable to read this Rocket Matter resource."
+    raise ResourceError(message) from None
 
 
 @mcp.resource("rocketmatter://security-notes", mime_type="text/markdown")
@@ -1004,7 +1033,7 @@ def security_notes_resource() -> str:
       create_expense, update_expense, delete_expense, create_invoice, update_invoice,
       delete_invoice, create_payment, create_transaction, update_transaction,
       delete_transaction.
-    - **Not in LCS /v1 (fail loud — kept for keep/drop review):** get_firm_summary,
+    - **Not in LCS /v1:** get_firm_summary,
       list_timekeepers, list_banks, list_chart_of_accounts, generate_invoice,
       list_billable_items, approve_invoice, get_invoice_allocations, the document
       actions, get_task_codes/get_activity_codes, all 17 lookups, all Accounts

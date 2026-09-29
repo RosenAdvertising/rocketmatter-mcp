@@ -308,6 +308,7 @@ class LCSClient:
             timeout=30,
         )
         if not resp.ok:
+            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure -- only the HTTP status is logged; no token, response body, or credential is included.
             logger.warning(
                 "oauth_response_rejected reason=token_refresh_failed status=%s",
                 resp.status_code,

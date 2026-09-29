@@ -49,6 +49,15 @@ def _text(result):
     return result.content[0].text
 
 
+def test_public_call_tool_preserves_safe_errors_without_transport(monkeypatch):
+    monkeypatch.setattr(server, "_c", lambda: _FakeClient(TransportError("POST")))
+    result = asyncio.run(server.mcp.call_tool("list_matters", {}))
+    assert _text(result) == (
+        "The operation outcome is unknown because the connection failed. "
+        "Check whether it completed before retrying."
+    )
+
+
 def test_missing_credentials_is_actionable_at_sdk_boundary(monkeypatch):
     result = asyncio.run(
         _call(

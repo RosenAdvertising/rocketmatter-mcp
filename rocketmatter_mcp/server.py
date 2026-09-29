@@ -6,7 +6,6 @@ import logging
 from typing import Annotated, NoReturn
 
 from mcp.server import MCPServer
-from mcp.server.context import ServerRequestContext
 from mcp.server.mcpserver.exceptions import (
     ResourceError,
     ToolError,
@@ -15,7 +14,6 @@ from mcp.server.mcpserver.exceptions import (
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolResult,
-    CallToolRequestParams,
     InputRequiredResult,
     TextContent,
 )
@@ -57,32 +55,25 @@ _SAFE_ARGUMENT_SHAPES = {
 class SafeMCPServer(MCPServer):
     """Return classified, sanitized failures and suppress unsafe SDK logging."""
 
-    async def _handle_call_tool(
+    async def call_tool(
         self,
-        ctx: ServerRequestContext,
-        params: CallToolRequestParams,
+        name,
+        arguments,
+        context=None,
     ) -> CallToolResult | InputRequiredResult:
-        from mcp.server.mcpserver.context import Context
-
-        context = Context(
-            request_context=ctx,
-            mcp_server=self,
-            input_params=params,
-            subscriptions=self._subscriptions,
-        )
         try:
-            return await self.call_tool(params.name, params.arguments or {}, context)
+            return await super().call_tool(name, arguments, context)
         except MCPError:
             raise
         except Exception as exc:
-            error = _safe_tool_error(exc, self._tool_manager.get_tool(params.name))
+            error = _safe_tool_error(exc, self._tool_manager.get_tool(name))
             if error is None:
                 logger.error("tool_failed reason=unexpected")
                 registered_names = {
                     tool.name for tool in self._tool_manager.list_tools()
                 }
-                if params.name in registered_names:
-                    message = f"Error executing tool {params.name}"
+                if name in registered_names:
+                    message = f"Error executing tool {name}"
                 else:
                     message = (
                         "Unexpected error while executing tool. Check server logs."

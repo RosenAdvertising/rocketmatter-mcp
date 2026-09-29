@@ -81,9 +81,8 @@ credentials.load_into_environ(
 # CosmoLex (same LCS API) = law.cosmolex.com. Overridable for staging.
 OAUTH_BASE = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
 
-# LCS Integration data host (the ProfitSolv Azure app). This is a DIFFERENT host
-# from the OAuth host — the 2026-06-15 "OAuth is dead" misdiagnosis came from
-# calling /v1 on app.rocketmatter.net (an empty-200 catch-all) instead of here.
+# LCS data requests use the ProfitSolv Azure host, separate from OAuth.
+# The product host returns an empty 200 catch-all for /v1 requests.
 API_BASE = os.environ.get(
     "ROCKETMATTER_API_BASE_URL",
     "https://lcs-developer-api-profitsolv-axc7hfgzafhga5ch.centralus-01.azurewebsites.net",
@@ -94,7 +93,7 @@ AUTHORIZE_URL = f"{OAUTH_BASE}/OAuth/authorize"
 
 # Registered redirect URI for the OAuth app — a hard constant, NOT env-derived, so the
 # setup wizard can detect a stored/overridden redirect that differs from what the app
-# will actually accept (a mismatch breaks consent). The dev2 app registered
+# will actually accept (a mismatch breaks consent). The OAuth app registered
 # ``https://example.com/oauth/callback``; setup uses a manual copy-paste of the
 # ``code`` from the address bar.
 REGISTERED_REDIRECT_URI = "https://example.com/oauth/callback"

@@ -459,3 +459,23 @@ def test_cli_success_output_does_not_emit_user_records(monkeypatch, capsys) -> N
     monkeypatch.setattr(sys, "argv", ["rocketmatter-mcp-setup"])
     oauth_flow.main()
     assert pii_sentinel not in capsys.readouterr().out
+
+
+@pytest.fixture(autouse=True)
+def validated_callback_for_token_exchange_tests(monkeypatch):
+    from rocketmatter_mcp.setup import oauth_flow
+
+    class BoundCallback:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def receive(self):
+            return "dummy-code"
+
+    monkeypatch.setattr(oauth_flow, "LoopbackCallback", BoundCallback)

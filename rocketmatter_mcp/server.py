@@ -40,6 +40,7 @@ _SAFE_HTTP_REASONS = {
     429: "Rate limit reached.",
 }
 _SAFE_ARGUMENT_SHAPES = {
+    ("fields", "a non-empty object"),
     ("page", "a whole number of at least 1"),
     (
         "page_size",

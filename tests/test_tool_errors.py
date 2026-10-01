@@ -473,7 +473,7 @@ def test_setup_prompt_eof_is_actionable_without_traceback(monkeypatch, capsys):
     assert "Traceback" not in output
 
 
-def test_setup_authorization_code_eof_exits_without_network(monkeypatch, capsys):
+def test_setup_callback_timeout_exits_without_network(monkeypatch, capsys):
     from rocketmatter_mcp.setup import oauth_flow
 
     monkeypatch.setattr(oauth_flow, "_capture", lambda *_args, **_kwargs: "fake")
@@ -483,6 +483,11 @@ def test_setup_authorization_code_eof_exits_without_network(monkeypatch, capsys)
         oauth_flow, "build_authorize_url", lambda *_args: "https://example.invalid"
     )
     monkeypatch.delenv("ROCKETMATTER_OAUTH_CODE", raising=False)
+    monkeypatch.setattr(
+        oauth_flow.LoopbackCallback,
+        "receive",
+        lambda self: (_ for _ in ()).throw(ValueError("timeout")),
+    )
     monkeypatch.setattr(oauth_flow.sys, "argv", ["rocketmatter-mcp-setup"])
     monkeypatch.setattr(
         "builtins.input", lambda _prompt: (_ for _ in ()).throw(EOFError())
@@ -491,7 +496,7 @@ def test_setup_authorization_code_eof_exits_without_network(monkeypatch, capsys)
         oauth_flow.main()
     output = capsys.readouterr().out
     assert caught.value.code == 1
-    assert "no authorization code" in output
+    assert "valid OAuth callback" in output
     assert "Traceback" not in output
 
 
@@ -661,3 +666,23 @@ def test_real_http_failures_are_errors_and_do_not_sleep(
     result = asyncio.run(_call(monkeypatch, client))
     assert _text(result) == expected
     assert sleeps == []
+
+
+@pytest.fixture(autouse=True)
+def validated_callback_for_token_exchange_tests(monkeypatch):
+    from rocketmatter_mcp.setup import oauth_flow
+
+    class BoundCallback:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def receive(self):
+            return "dummy-code"
+
+    monkeypatch.setattr(oauth_flow, "LoopbackCallback", BoundCallback)

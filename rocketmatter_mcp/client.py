@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -51,6 +52,8 @@ from urllib.parse import quote, urlencode
 import requests
 
 from rocketmatter_mcp import credentials
+from rocketmatter_mcp.private_storage import atomic_private_write
+from rocketmatter_mcp.endpoint_validation import LCS_HOSTS, vendor_endpoint
 from rocketmatter_mcp.errors import (
     ArgumentValidationError,
     AuthenticationError,
@@ -89,19 +92,14 @@ API_BASE = os.environ.get(
     "https://lcs-developer-api-profitsolv-axc7hfgzafhga5ch.centralus-01.azurewebsites.net",
 )
 
+OAUTH_BASE = vendor_endpoint(OAUTH_BASE, {"app.rocketmatter.net"})
+API_BASE = vendor_endpoint(API_BASE, LCS_HOSTS)
+
 TOKEN_URL = f"{OAUTH_BASE}/api/ext/auth/token"
 AUTHORIZE_URL = f"{OAUTH_BASE}/OAuth/authorize"
 
-# Registered redirect URI for the OAuth app — a hard constant, NOT env-derived, so the
-# setup wizard can detect a stored/overridden redirect that differs from what the app
-# will actually accept (a mismatch breaks consent). The OAuth app registered
-# ``https://example.com/oauth/callback``; setup uses a manual copy-paste of the
-# ``code`` from the address bar.
-REGISTERED_REDIRECT_URI = "https://example.com/oauth/callback"
-
-# Effective redirect for building the consent URL: an explicit ROCKETMATTER_REDIRECT_URI
-# override wins (once a different redirect is registered on the app), else the
-# registered constant above.
+# The firm must register this exact callback with the vendor before setup.
+REGISTERED_REDIRECT_URI = "http://127.0.0.1:8771/callback"
 DEFAULT_REDIRECT_URI = (
     os.environ.get("ROCKETMATTER_REDIRECT_URI") or REGISTERED_REDIRECT_URI
 )
@@ -225,14 +223,7 @@ def _load_tokens() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        CONFIG_DIR.chmod(0o700)
-    except OSError:
-        pass
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(tokens, f, indent=2)
-    os.chmod(TOKEN_FILE, 0o600)
+    atomic_private_write(TOKEN_FILE, json.dumps(tokens, indent=2))
 
 
 def _token_record(data: dict, prev: dict | None = None) -> dict:
@@ -263,7 +254,9 @@ def _token_record(data: dict, prev: dict | None = None) -> dict:
 
 
 def build_authorize_url(
-    redirect_uri: str | None = None, client_id: str | None = None
+    redirect_uri: str | None = None,
+    client_id: str | None = None,
+    state: str | None = None,
 ) -> str:
     """Build the browser consent URL the user opens to authorize the integration."""
     client_id = client_id or os.environ.get("ROCKETMATTER_CLIENT_ID", "")
@@ -273,6 +266,7 @@ def build_authorize_url(
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
+            "state": state or secrets.token_urlsafe(32),
         }
     )
     return f"{AUTHORIZE_URL}?{query}"
@@ -312,6 +306,7 @@ def exchange_code(
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
+            allow_redirects=False,
         )
     except (requests.Timeout, requests.ConnectionError) as exc:
         raise TransportError("POST") from exc
@@ -393,6 +388,7 @@ class LCSClient:
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=30,
+                allow_redirects=False,
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise TransportError("POST") from exc
@@ -441,6 +437,7 @@ class LCSClient:
                 json=body,
                 headers=self._headers(),
                 timeout=_HTTP_TIMEOUT,
+                allow_redirects=False,
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise TransportError(method) from exc
@@ -454,6 +451,7 @@ class LCSClient:
                     json=body,
                     headers=self._headers(),
                     timeout=_HTTP_TIMEOUT,
+                    allow_redirects=False,
                 )
             except (requests.Timeout, requests.ConnectionError) as exc:
                 raise TransportError(method) from exc
@@ -604,6 +602,8 @@ class LCSClient:
         ``400 "Name cannot be empty"``), so the current record must be merged in.
         ``method`` is ``PUT`` for most resources, ``PATCH`` for invoices.
         """
+        if not fields:
+            raise ArgumentValidationError("fields", "a non-empty object")
         record_id = _path_id(record_id, "record_id")
         current = self._detail(resource, record_id)
         if current is None:

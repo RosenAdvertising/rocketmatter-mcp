@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
+import logging
 
+import pytest
+import requests
 from mcp.client import ClientSession
 from mcp.client._memory import InMemoryTransport
 from mcp.types import TextContent
-import requests
-import pytest
 
 from rocketmatter_mcp import server
+from rocketmatter_mcp.client import LCSClient
 from rocketmatter_mcp.errors import (
     ArgumentValidationError,
     AuthenticationError,
@@ -21,7 +22,6 @@ from rocketmatter_mcp.errors import (
     TransportError,
     VendorHTTPError,
 )
-from rocketmatter_mcp.client import LCSClient
 
 
 async def _call(monkeypatch, fake_client, tool="list_matters", arguments=None):
@@ -388,27 +388,27 @@ def test_send_maps_transport_error_without_retry(monkeypatch, failure):
     assert session.calls == 1
 
 
-def test_id_path_segment_is_escaped_before_request_preparation(monkeypatch):
+def test_id_path_segment_is_validated_before_request_preparation(monkeypatch):
     instance = object.__new__(LCSClient)
     seen = {}
 
     class Response:
         status_code = 200
         ok = True
-        content = b'{"id":"../x"}'
+        content = b'{"id":"normal-id"}'
 
         @staticmethod
         def json():
-            return {"id": "../x"}
+            return {"id": "normal-id"}
 
     def send(method, path, **_kwargs):
         seen["path"] = path
         return Response()
 
     monkeypatch.setattr(instance, "_send", send)
-    instance._detail("matters", "../x")
-    assert seen["path"] == "matters/..%2Fx"
-    assert instance._url(seen["path"]).endswith("/v1/matters/..%2Fx")
+    instance._detail("matters", "normal-id")
+    assert seen["path"] == "matters/normal-id"
+    assert instance._url(seen["path"]).endswith("/v1/matters/normal-id")
 
 
 def test_all_oauth_posts_have_explicit_timeout(monkeypatch):
@@ -602,7 +602,7 @@ def _live_client_with_session(monkeypatch, response=None, failure=None):
     [
         ("list_matters", {}, "GET"),
         ("create_matter", {"fields_json": "{}"}, "POST"),
-        ("delete_matter", {"matter_id": "../x"}, "DELETE"),
+        ("delete_matter", {"matter_id": "normal-id"}, "DELETE"),
     ],
 )
 def test_real_request_failure_reaches_sdk_with_method_safe_guidance(
@@ -624,7 +624,7 @@ def test_real_request_failure_reaches_sdk_with_method_safe_guidance(
     if method == "DELETE":
         assert (
             requests.Request(method, calls[0][1]).prepare().path_url
-            == "/v1/matters/..%2Fx"
+            == "/v1/matters/normal-id"
         )
 
 

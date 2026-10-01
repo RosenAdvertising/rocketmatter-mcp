@@ -17,9 +17,9 @@ from mcp.types import (
     InputRequiredResult,
     TextContent,
 )
-from pydantic import Field, ValidationError
+from pydantic import BeforeValidator, Field, ValidationError
 
-from rocketmatter_mcp.client import LCSClient, _VENDOR_REASONS
+from rocketmatter_mcp.client import _VENDOR_REASONS, LCSClient
 from rocketmatter_mcp.errors import (
     ArgumentValidationError,
     AuthenticationError,
@@ -87,6 +87,8 @@ class SafeMCPServer(MCPServer):
 
 
 def _validation_shape(error_type: str, field: str) -> str:
+    if error_type == "value_error" and field in {"user_id", "shortcut_id"}:
+        return "an integer identifier (not a boolean)"
     if field == "page":
         return "a whole number of at least 1"
     if field == "page_size":
@@ -178,7 +180,12 @@ def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
         if isinstance(error, NotFoundError):
             return "not_found", "The requested Rocket Matter record was not found."
         if isinstance(error, ArgumentValidationError):
-            if (error.argument, error.expected) in _SAFE_ARGUMENT_SHAPES:
+            if (error.argument, error.expected) in _SAFE_ARGUMENT_SHAPES or (
+                tool is not None
+                and error.argument in tool.parameters.get("properties", {})
+                and error.expected
+                == "a non-empty plain identifier (ASCII letters, digits, -, _, ., ~); not . or .."
+            ):
                 return (
                     "argument_validation",
                     f"Invalid argument {error.argument}: expected {error.expected}.",
@@ -257,6 +264,17 @@ mcp = SafeMCPServer(
 # risking a retry/duplicate. Failing loud via ``isError`` is both correct and safe.
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_boolean_path_id(value):
+    """Reject booleans before integer coercion; preserve all other SDK inputs."""
+    if isinstance(value, bool):
+        raise ValueError("Use an integer identifier, not a boolean.")
+    return value
+
+
+# A before-validator preserves the existing integer JSON schema and coercions.
+PathId = Annotated[int, BeforeValidator(_reject_boolean_path_id)]
 
 Page = Annotated[int, Field(ge=1, description="One-based vendor API page number.")]
 PageSize = Annotated[
@@ -710,7 +728,7 @@ def list_users(page: Page = 1, page_size: PageSize = 25) -> str:
 
 
 @mcp.tool()
-def get_user(user_id: int) -> str:
+def get_user(user_id: PathId) -> str:
     """Get a firm user by numeric ID."""
     return json.dumps(_c().get_user(user_id), indent=2)
 
@@ -750,7 +768,7 @@ def list_text_shortcuts(page: Page = 1, page_size: PageSize = 25) -> str:
 
 
 @mcp.tool()
-def get_text_shortcut(shortcut_id: int) -> str:
+def get_text_shortcut(shortcut_id: PathId) -> str:
     """Get a text shortcut by ID (subject to the same /v1 authorization as
     list_text_shortcuts)."""
     return json.dumps(_c().get_text_shortcut(shortcut_id), indent=2)

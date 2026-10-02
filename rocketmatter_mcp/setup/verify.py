@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Verify Rocketmatter MCP credentials (scoped OAuth — LCS /v1 Integration API)."""
 
-import json
 import sys
 
 from rocketmatter_mcp.client import LCSClient
@@ -17,11 +16,10 @@ def main():
         total = users.get("totalCount") if isinstance(users, dict) else "?"
         print("✓ Authenticated — ProfitSolv LCS /v1 Integration API reachable")
         print(f"  (firm users: {total})")
-        print()
-        print(json.dumps(users, indent=2))
-    except Exception as e:  # noqa: BLE001
-        print(f"✗ Verification failed: {e}")
-        print("If the refresh token was revoked, re-run: rocketmatter-mcp-setup")
+    except Exception:  # noqa: BLE001
+        print(
+            "✗ Verification failed. Check the Rocket Matter app credentials and authorization, then run rocketmatter-mcp-setup. Restart the MCP server after setup."
+        )
         sys.exit(1)
 
 

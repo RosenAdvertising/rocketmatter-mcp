@@ -39,6 +39,7 @@ court rules.
 ## Requirements
 
 - Python 3.10+
+- Python MCP SDK >=2.2,<3 (protocol revision 2026-07-28)
 - Claude Desktop (or any MCP-compatible client)
 - A Rocket Matter account **and** a registered OAuth integration (API key + OAuth
   client ID/secret) for the ProfitSolv LCS Integration API
@@ -55,18 +56,24 @@ pip install rocketmatter-mcp
 rocketmatter-mcp-setup
 ```
 
+Before setup, the firm must register **`http://127.0.0.1:8771/callback`** as an
+OAuth redirect with Rocket Matter / ProfitSolv. To use another port, set
+`ROCKETMATTER_REDIRECT_URI` to the exact registered HTTP loopback URI (`127.0.0.1`,
+explicit port and callback path). `localhost`, IPv6 and external callbacks are rejected.
+
 The wizard:
 
-1. Stores your integration's **API key**, **OAuth client ID**, and **client secret**
-   in your OS keyring (see Credential storage below).
-2. Prints an authorization URL. Open it in your browser (logged in to Rocket Matter)
-   and click **Allow**.
-3. Your browser redirects to the app's registered redirect URI
-   (`https://example.com/oauth/callback`) with a `?code=...` parameter. The page may
-   show an error — that's fine; just copy the `code` value from the address bar and
-   paste it back into the wizard.
-4. The wizard exchanges the code for an access token + refresh token, cached at
-   `~/.rocketmatter-mcp/tokens.json` (chmod 600).
+1. Stores the integration's API key, OAuth client ID, and client secret in the OS
+   keyring (with a private file fallback).
+2. Binds the configured local callback before printing the authorization URL.
+   Open that URL in your browser and click **Allow**.
+3. Receives the callback locally and checks the session's random `state` before
+   exchanging the code. It stops if the port is occupied or consent times out.
+4. Atomically caches access and refresh tokens in `~/.rocketmatter-mcp/tokens.json`,
+   created with mode `0600` before writing any secret bytes.
+
+Authorization codes are never accepted in command-line arguments or environment
+variables. The callback handles them automatically.
 
 After that, the client refreshes its own access token with the long-lived refresh
 token — no browser, no password — so you won't be prompted again unless the refresh
@@ -101,12 +108,16 @@ via the cross-platform [`keyring`](https://github.com/jaraco/keyring) library:
 | Windows | Credential Manager                       |
 | Linux   | Secret Service (GNOME Keyring / KWallet) |
 
-Secrets are saved under the service name `rocketmatter-mcp`. Nothing is written to
-disk in clear text.
+With a working keyring backend, secrets are saved under the service name
+`rocketmatter-mcp` and are not written to the fallback file.
 
 **File fallback.** On a host with no keyring backend (e.g. a headless Linux box
 without Secret Service), or if you set `ROCKETMATTER_MCP_USE_KEYRING=0`, credentials
 fall back to a `~/.rocketmatter-mcp/.env` file with `0600` permissions.
+
+On Windows, the file is stored in the user's profile and protected by Windows'
+default per-user access rules. On POSIX, files are created with `0600` permissions
+and writes fail closed if private permissions cannot be established.
 
 **Read order.** Credentials resolve in the order OS keyring → process environment
 → `.env` file.
@@ -143,3 +154,14 @@ Hosts are overridable via `ROCKETMATTER_BASE_URL` (OAuth host — Rocket Matter
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Endpoint configuration
+
+OAuth accepts only `https://app.rocketmatter.net`. The data endpoint accepts only
+the two exact ProfitSolv LCS production/sandbox hosts listed in
+`rocketmatter_mcp/endpoint_validation.py`; arbitrary Azure tenants are rejected.
+Both endpoint settings reject userinfo, paths, query strings, fragments and ports
+other than 443. A new vendor endpoint requires an allowlist update after verification.
+The [public LCS sandbox Swagger document](https://lcs-developer-api-profi-sandbox-gncndgfccdgxdtff.centralus-01.azurewebsites.net/swagger/v1/swagger.json)
+identifies the ProfitSolv LCS gateway. The [legacy Rocket Matter reference](https://developer.rocketmatter.com/)
+describes a different API; it does not establish additional LCS hosts.

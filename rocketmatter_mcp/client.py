@@ -21,11 +21,11 @@ return a paginated envelope ``{page,pageSize,totalCount,items,totalPages}``
 (``documents`` returns a bare list); detail / create / update / delete use the
 RESTful item route ``/v1/{resource}/{id}``.
 
-Verified live 2026-06-27 against Toby's dev2 firm 44430: OAuth refresh; reads on
+Previously exercised against a development account: OAuth refresh; reads on
 clients/contacts/users/matters/invoices/payments/expense/time-entries/documents;
 and create→read→update→delete round-trips for client, matter, time-entry, and
-expense (each self-cleaned). Server-side LIST filters are forwarded ONLY where /v1
-actually honors them (verified live): clients ``name``/``displayName``, matters
+expense (each self-cleaned). Server-side LIST filters are forwarded only where /v1
+honors them: clients ``name``/``displayName``, matters
 ``clientId``/``matterName``, time-entries ``matterId``, transactions/codes
 ``matterId`` (required). /v1 SILENTLY IGNORES filters elsewhere (expense ignores
 ``matterId``; contacts/users/invoices/payments/documents honor none), so those
@@ -37,19 +37,34 @@ accounts-payable, lookups, document actions, tasks, timers, calendar, tags, trus
 rates, firm roles, tax/discount, phone messages, internal chat, workflow, reports,
 recurring billing, matter templates, court rules) are kept as **fail-loud stubs**
 via :meth:`_not_in_v1` — they raise a clear "not in the LCS /v1 API" error instead
-of silently returning nothing, pending Toby's keep/drop call. See the module
-``COVERAGE_DELTA`` list and the wiki page ``Rocketmatter MCP``.
+of silently returning nothing. See the module ``COVERAGE_DELTA`` list.
 """
 
 import json
+import logging
 import os
+import re
+import secrets
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
 from rocketmatter_mcp import credentials
+from rocketmatter_mcp.private_storage import atomic_private_write
+from rocketmatter_mcp.endpoint_validation import LCS_HOSTS, vendor_endpoint
+from rocketmatter_mcp.errors import (
+    ArgumentValidationError,
+    AuthenticationError,
+    CapabilityUnavailableError,
+    MissingCredentialsError,
+    NotFoundError,
+    TransportError,
+    VendorHTTPError,
+)
+
+logger = logging.getLogger(__name__)
 
 # Resolve credentials through the pluggable store (OS keyring -> env -> .env file).
 # The LCS /v1 OAuth model needs the app's API key + the OAuth client_id/secret; the
@@ -70,27 +85,21 @@ credentials.load_into_environ(
 # CosmoLex (same LCS API) = law.cosmolex.com. Overridable for staging.
 OAUTH_BASE = os.environ.get("ROCKETMATTER_BASE_URL", "https://app.rocketmatter.net")
 
-# LCS Integration data host (the ProfitSolv Azure app). This is a DIFFERENT host
-# from the OAuth host — the 2026-06-15 "OAuth is dead" misdiagnosis came from
-# calling /v1 on app.rocketmatter.net (an empty-200 catch-all) instead of here.
+# LCS data requests use the ProfitSolv Azure host, separate from OAuth.
+# The product host returns an empty 200 catch-all for /v1 requests.
 API_BASE = os.environ.get(
     "ROCKETMATTER_API_BASE_URL",
     "https://lcs-developer-api-profitsolv-axc7hfgzafhga5ch.centralus-01.azurewebsites.net",
 )
 
+OAUTH_BASE = vendor_endpoint(OAUTH_BASE, {"app.rocketmatter.net"})
+API_BASE = vendor_endpoint(API_BASE, LCS_HOSTS)
+
 TOKEN_URL = f"{OAUTH_BASE}/api/ext/auth/token"
 AUTHORIZE_URL = f"{OAUTH_BASE}/OAuth/authorize"
 
-# Registered redirect URI for the OAuth app — a hard constant, NOT env-derived, so the
-# setup wizard can detect a stored/overridden redirect that differs from what the app
-# will actually accept (a mismatch breaks consent). The dev2 app registered
-# ``https://example.com/oauth/callback``; setup uses a manual copy-paste of the
-# ``code`` from the address bar.
-REGISTERED_REDIRECT_URI = "https://example.com/oauth/callback"
-
-# Effective redirect for building the consent URL: an explicit ROCKETMATTER_REDIRECT_URI
-# override wins (once a different redirect is registered on the app), else the
-# registered constant above.
+# The firm must register this exact callback with the vendor before setup.
+REGISTERED_REDIRECT_URI = "http://127.0.0.1:8771/callback"
 DEFAULT_REDIRECT_URI = (
     os.environ.get("ROCKETMATTER_REDIRECT_URI") or REGISTERED_REDIRECT_URI
 )
@@ -104,6 +113,70 @@ _EXPIRY_SKEW = 90
 # Per-request timeout (seconds) for data calls — a stalled /v1 call must not hang
 # the MCP tool indefinitely.
 _HTTP_TIMEOUT = 30
+
+_HTTP_REASONS = {
+    400: "The request did not pass vendor validation.",
+    403: "access denied",
+    404: "The requested record was not found.",
+    409: "The request conflicts with the current record state.",
+    422: "The request did not pass vendor validation.",
+    429: "The vendor rate limit was reached.",
+}
+
+
+_VENDOR_REASONS = {
+    "invalid_request": "The request is invalid.",
+    "validation_error": "Request validation failed.",
+    "invalid_parameter": "A request parameter is invalid.",
+    "service_unavailable": "The service is temporarily unavailable.",
+}
+
+
+def _vendor_reason(response, status):
+    fallback = _HTTP_REASONS.get(status, "The vendor rejected the request.")
+    if response is None:
+        return fallback
+    try:
+        data = response.json()
+    except ValueError:
+        return fallback
+    if isinstance(data, dict):
+        for source in (data, data.get("error")):
+            if isinstance(source, dict):
+                for key in ("code", "error_code", "error", "message", "detail"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.lower() in _VENDOR_REASONS:
+                        return _VENDOR_REASONS[value.lower()]
+    return fallback
+
+
+def _vendor_http_error(status: int, headers=None, response=None) -> RuntimeError:
+    if status == 401:
+        return AuthenticationError("Rocket Matter rejected or expired authorization")
+    retry_after = None
+    if status == 429 and headers is not None:
+        value = headers.get("Retry-After", "")
+        if (
+            isinstance(value, str)
+            and len(value) <= 5
+            and value.isascii()
+            and value.isdecimal()
+            and 1 <= int(value) <= 86400
+        ):
+            retry_after = str(int(value))
+    if status == 404:
+        return NotFoundError("The requested Rocket Matter record was not found")
+    reason = (
+        "Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so)."
+        if status == 403
+        else _vendor_reason(response, status)
+    )
+    return VendorHTTPError(
+        status,
+        reason,
+        retry_after,
+    )
+
 
 # A JSON body carrying any of these keys (or ``success: false``) is an API
 # error/problem envelope, not a record. Used on the 404 detail path to reject an
@@ -122,7 +195,7 @@ _ERROR_ENVELOPE_KEYS = (
 )
 
 # Tools whose capability the LCS /v1 API does not expose (kept as fail-loud stubs).
-# Surfaced for Toby's keep/drop call — NOT silently dropped.
+# Capabilities not exposed by the current LCS API.
 COVERAGE_DELTA = [
     "list_timekeepers (billable-time summary)",
     "get_firm_summary",
@@ -150,14 +223,7 @@ def _load_tokens() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        CONFIG_DIR.chmod(0o700)
-    except OSError:
-        pass
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(tokens, f, indent=2)
-    os.chmod(TOKEN_FILE, 0o600)
+    atomic_private_write(TOKEN_FILE, json.dumps(tokens, indent=2))
 
 
 def _token_record(data: dict, prev: dict | None = None) -> dict:
@@ -171,7 +237,10 @@ def _token_record(data: dict, prev: dict | None = None) -> dict:
     prev = prev or {}
     access = data.get("access_token")
     if not access:
-        raise RuntimeError(f"Token response had no access_token: {str(data)[:200]}")
+        logger.warning("oauth_response_rejected reason=missing_access_token")
+        raise AuthenticationError(
+            "Rocket Matter authorization returned no access token"
+        )
     return {
         "access_token": access,
         "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
@@ -185,7 +254,9 @@ def _token_record(data: dict, prev: dict | None = None) -> dict:
 
 
 def build_authorize_url(
-    redirect_uri: str | None = None, client_id: str | None = None
+    redirect_uri: str | None = None,
+    client_id: str | None = None,
+    state: str | None = None,
 ) -> str:
     """Build the browser consent URL the user opens to authorize the integration."""
     client_id = client_id or os.environ.get("ROCKETMATTER_CLIENT_ID", "")
@@ -195,6 +266,7 @@ def build_authorize_url(
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
+            "state": state or secrets.token_urlsafe(32),
         }
     )
     return f"{AUTHORIZE_URL}?{query}"
@@ -219,30 +291,50 @@ def exchange_code(
     client_id = client_id or os.environ.get("ROCKETMATTER_CLIENT_ID", "")
     client_secret = client_secret or os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
     if not (client_id and client_secret):
-        raise RuntimeError(
-            "ROCKETMATTER_CLIENT_ID and ROCKETMATTER_CLIENT_SECRET are required to "
-            "exchange the authorization code. Run: rocketmatter-mcp-setup"
+        logger.warning("oauth_request_rejected reason=missing_client_credentials")
+        raise MissingCredentialsError(
+            ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
         )
-    resp = requests.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "code": code,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+            allow_redirects=False,
+        )
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        raise TransportError("POST") from exc
     if not resp.ok:
-        raise RuntimeError(
-            f"Authorization-code exchange failed ({resp.status_code}): "
-            f"{resp.text[:300]}"
+        logger.warning(
+            "oauth_response_rejected reason=authorization_exchange_failed status=%s",
+            resp.status_code,
         )
+        raise _vendor_http_error(resp.status_code, resp.headers, resp)
     tokens = _token_record(resp.json())
     if save:
         _save_tokens(tokens)
     return tokens
+
+
+def _path_id(value, parameter: str) -> str:
+    """Validate a plain identifier before URL quoting or any HTTP request."""
+    expected = (
+        "a non-empty plain identifier (ASCII letters, digits, -, _, ., ~); not . or .."
+    )
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (str, int))
+        or str(value) in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", str(value)) is None
+    ):
+        raise ArgumentValidationError(parameter, expected)
+    return quote(str(value), safe="")
 
 
 class LCSClient:
@@ -261,13 +353,11 @@ class LCSClient:
         self._client_secret = os.environ.get("ROCKETMATTER_CLIENT_SECRET", "")
         self._tokens = _load_tokens()
         if not self._tokens.get("access_token"):
-            raise RuntimeError(
-                "No Rocket Matter OAuth tokens found. Run: rocketmatter-mcp-setup"
-            )
+            logger.warning("client_initialization_rejected reason=missing_oauth_tokens")
+            raise MissingCredentialsError(("Rocket Matter OAuth tokens",))
         if not self._api_key:
-            raise RuntimeError(
-                "ROCKETMATTER_API_KEY is not set. Run: rocketmatter-mcp-setup"
-            )
+            logger.warning("client_initialization_rejected reason=missing_api_key")
+            raise MissingCredentialsError(("ROCKETMATTER_API_KEY",))
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -280,28 +370,39 @@ class LCSClient:
         """Get a fresh access token via the long-lived refresh token (no password)."""
         refresh_token = self._tokens.get("refresh_token")
         if not refresh_token:
-            raise RuntimeError("No refresh_token cached. Run: rocketmatter-mcp-setup")
+            logger.warning("oauth_request_rejected reason=missing_refresh_token")
+            raise MissingCredentialsError(("Rocket Matter refresh token",))
         if not (self._client_id and self._client_secret):
-            raise RuntimeError(
-                "ROCKETMATTER_CLIENT_ID / ROCKETMATTER_CLIENT_SECRET not set. "
-                "Run: rocketmatter-mcp-setup"
+            logger.warning("oauth_request_rejected reason=missing_client_credentials")
+            raise MissingCredentialsError(
+                ("ROCKETMATTER_CLIENT_ID", "ROCKETMATTER_CLIENT_SECRET")
             )
-        resp = requests.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "refresh_token": refresh_token,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "refresh_token": refresh_token,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+                allow_redirects=False,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise TransportError("POST") from exc
         if not resp.ok:
-            raise RuntimeError(
-                f"Token refresh failed ({resp.status_code}): {resp.text[:200]}. "
-                "The refresh token may be revoked — re-run rocketmatter-mcp-setup."
+            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure -- only the HTTP status is logged; no token, response body, or credential is included.
+            logger.warning(
+                "oauth_response_rejected reason=token_refresh_failed status=%s",
+                resp.status_code,
             )
+            if resp.status_code in (400, 401):
+                raise AuthenticationError(
+                    "Rocket Matter rejected or expired authorization"
+                )
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         self._tokens = _token_record(resp.json(), self._tokens)
         _save_tokens(self._tokens)
 
@@ -328,16 +429,7 @@ class LCSClient:
         if not self._token_valid():
             self._refresh()
         url = self._url(path)
-        resp = self.session.request(
-            method,
-            url,
-            params=params,
-            json=body,
-            headers=self._headers(),
-            timeout=_HTTP_TIMEOUT,
-        )
-        if resp.status_code == 401:
-            self._refresh()
+        try:
             resp = self.session.request(
                 method,
                 url,
@@ -345,19 +437,52 @@ class LCSClient:
                 json=body,
                 headers=self._headers(),
                 timeout=_HTTP_TIMEOUT,
+                allow_redirects=False,
             )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise TransportError(method) from exc
+        if resp.status_code == 401:
+            self._refresh()
+            try:
+                resp = self.session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=body,
+                    headers=self._headers(),
+                    timeout=_HTTP_TIMEOUT,
+                    allow_redirects=False,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                raise TransportError(method) from exc
         return resp
 
     @staticmethod
     def _json_or_raise(resp: requests.Response):
         """Parse a JSON body, or raise a loud error on a non-2xx response."""
         if not resp.ok:
-            raise RuntimeError(
-                f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "api_response_rejected reason=http_error status=%s", resp.status_code
             )
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         if not resp.content:
             return {}
-        return resp.json()
+        data = resp.json()
+        LCSClient._reject_failed_response(data, resp.status_code)
+        return data
+
+    @staticmethod
+    def _reject_failed_response(data, status: int) -> None:
+        if isinstance(data, dict) and (
+            data.get("success") is False
+            or (
+                data.get("success") is None
+                and (data.get("error") or data.get("errors"))
+            )
+        ):
+            raise VendorHTTPError(
+                status, "The vendor reported that the request failed."
+            )
 
     # ── Generic resource operations ──────────────────────────────────────────
 
@@ -367,9 +492,38 @@ class LCSClient:
         ``page`` / ``pageSize`` are the live-confirmed pagination params; extra
         non-None query params (filters) pass through unchanged.
         """
+        if page < 1:
+            logger.warning("list_request_rejected reason=page_below_minimum")
+            raise ArgumentValidationError("page", "a whole number of at least 1")
+        if not 1 <= page_size <= 200:
+            logger.warning("list_request_rejected reason=page_size_out_of_range")
+            raise ArgumentValidationError(
+                "page_size",
+                "a whole number greater than or equal to 1 and less than or equal to 200",
+            )
+
         query: dict = {"page": page, "pageSize": page_size}
         query.update({k: v for k, v in params.items() if v is not None})
-        return self._json_or_raise(self._send("GET", resource, params=query))
+        result = self._json_or_raise(self._send("GET", resource, params=query))
+
+        # Enforce the caller's requested cap even if an upstream endpoint ignores
+        # pageSize. Most endpoints return an envelope; documents may return a list.
+        if isinstance(result, list):
+            if len(result) > page_size:
+                logger.warning(
+                    "list_response_capped reason=upstream_over_return resource=%s",
+                    resource,
+                )
+            return result[:page_size]
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            items = result["items"]
+            if len(items) > page_size:
+                logger.warning(
+                    "list_response_capped reason=upstream_over_return resource=%s",
+                    resource,
+                )
+                result = {**result, "items": items[:page_size]}
+        return result
 
     @staticmethod
     def _is_error_envelope(data: dict) -> bool:
@@ -386,7 +540,8 @@ class LCSClient:
     def _detail(self, resource: str, record_id) -> dict | None:
         """GET a single record by id via the RESTful item route.
 
-        Returns the record dict, or ``None`` if it does not exist. Tolerates a known
+        Returns the record dict. Raises :class:`NotFoundError` if it does not exist.
+        Tolerates a known
         server quirk where an existing record is occasionally returned with a 404
         status but a populated record body. The "found" path is strict: a 2xx with a
         dict body, or a 404 whose body is unmistakably the record — a truthy ``id``
@@ -397,7 +552,7 @@ class LCSClient:
         corrupt data). The bias is deliberate: a real record misjudged not-found fails
         loudly in :meth:`_update`; the inverse corrupts.
         """
-        resp = self._send("GET", f"{resource}/{record_id}")
+        resp = self._send("GET", f"{resource}/{_path_id(record_id, 'record_id')}")
         data = None
         if resp.content:
             try:
@@ -405,7 +560,14 @@ class LCSClient:
             except ValueError:
                 data = None
         if resp.ok:
-            return data if isinstance(data, dict) else None
+            self._reject_failed_response(data, resp.status_code)
+            if isinstance(data, dict):
+                return data
+            logger.warning(
+                "api_response_rejected reason=invalid_detail_shape resource=%s",
+                resource,
+            )
+            return None
         if resp.status_code == 404:
             # Known quirk: an existing record is occasionally returned WITH a 404
             # status but a full record body. Accept that ONLY when the body is a real
@@ -417,10 +579,14 @@ class LCSClient:
                 and not self._is_error_envelope(data)
             ):
                 return data
-            return None
-        raise RuntimeError(
-            f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+            logger.info("api_response_rejected reason=not_found resource=%s", resource)
+            raise NotFoundError("The requested Rocket Matter record was not found")
+        logger.warning(
+            "api_response_rejected reason=http_error resource=%s status=%s",
+            resource,
+            resp.status_code,
         )
+        raise _vendor_http_error(resp.status_code, resp.headers, resp)
 
     def _create(self, resource: str, body: dict) -> dict:
         """POST to a collection -> the created record (201)."""
@@ -436,12 +602,22 @@ class LCSClient:
         ``400 "Name cannot be empty"``), so the current record must be merged in.
         ``method`` is ``PUT`` for most resources, ``PATCH`` for invoices.
         """
+        if not fields:
+            raise ArgumentValidationError("fields", "a non-empty object")
+        record_id = _path_id(record_id, "record_id")
         current = self._detail(resource, record_id)
         if current is None:
-            raise RuntimeError(f"{resource} {record_id} not found; cannot update.")
+            logger.warning(
+                "update_request_rejected reason=record_not_found resource=%s", resource
+            )
+            raise NotFoundError(
+                "The requested record was not found; it cannot be updated"
+            )
         merged = {**current, **fields}
         return self._json_or_raise(
-            self._send(method, f"{resource}/{record_id}", body=merged)
+            self._send(
+                method, f"{resource}/{_path_id(record_id, 'record_id')}", body=merged
+            )
         )
 
     def _delete(self, resource: str, record_id) -> dict:
@@ -451,14 +627,17 @@ class LCSClient:
         routes instead return a 200 whose BODY reports the real outcome — a
         ``{"success": false, ...}`` (or an ``error``/``errors`` payload) there is a
         FAILURE despite the 2xx. The body is read so that is surfaced as an error
-        (Rule 12 — never a false success) rather than reported as deleted; only a body
+        rather than reported as deleted; only a body
         that does not contradict success returns ``{"success": True}``.
         """
-        resp = self._send("DELETE", f"{resource}/{record_id}")
+        resp = self._send("DELETE", f"{resource}/{_path_id(record_id, 'record_id')}")
         if not resp.ok:
-            raise RuntimeError(
-                f"RocketMatter /v1 error {resp.status_code}: {resp.text[:400]}"
+            logger.warning(
+                "delete_response_rejected reason=http_error resource=%s status=%s",
+                resource,
+                resp.status_code,
             )
+            raise _vendor_http_error(resp.status_code, resp.headers, resp)
         if not resp.content:
             return {"success": True}
         try:
@@ -473,9 +652,14 @@ class LCSClient:
                 and (data.get("error") or data.get("errors"))
             )
         ):
-            raise RuntimeError(
-                f"RocketMatter /v1 delete reported failure despite HTTP "
-                f"{resp.status_code}: {str(data)[:400]}"
+            logger.warning(
+                "delete_response_rejected reason=semantic_failure resource=%s "
+                "status=%s",
+                resource,
+                resp.status_code,
+            )
+            raise VendorHTTPError(
+                resp.status_code, "The vendor reported that the delete failed."
             )
         return {"success": True}
 
@@ -483,9 +667,12 @@ class LCSClient:
         """Standard fail-loud error for a capability the LCS /v1 API lacks.
 
         Never returns a false success — the tool raises so the gap is visible
-        (Rule 12). Kept registered for Toby's keep/drop call; see ``COVERAGE_DELTA``.
+        Kept registered to report unavailable capabilities; see ``COVERAGE_DELTA``.
         """
-        return RuntimeError(
+        logger.warning(
+            "capability_request_rejected reason=not_in_v1 capability=%s", capability
+        )
+        return CapabilityUnavailableError(
             f"'{capability}' is not available in the ProfitSolv LCS /v1 Integration "
             "API (the scoped-OAuth data API this MCP uses). It existed on the legacy "
             "/api/v2 session API, which trips Rocket Matter's single-session limit "
@@ -518,16 +705,16 @@ class LCSClient:
         )
 
     def get_matter(self, matter_id: str) -> dict | None:
-        return self._detail("matters", matter_id)
+        return self._detail("matters", _path_id(matter_id, "matter_id"))
 
     def create_matter(self, **fields) -> dict:
         return self._create("matters", fields)
 
     def update_matter(self, matter_id: str, **fields) -> dict:
-        return self._update("matters", matter_id, fields)
+        return self._update("matters", _path_id(matter_id, "matter_id"), fields)
 
     def delete_matter(self, matter_id: str) -> dict:
-        return self._delete("matters", matter_id)
+        return self._delete("matters", _path_id(matter_id, "matter_id"))
 
     # ═════════════════════════════ Clients ══════════════════════════════════
 
@@ -553,7 +740,7 @@ class LCSClient:
         )
 
     def get_client(self, client_id: str) -> dict | None:
-        return self._detail("clients", client_id)
+        return self._detail("clients", _path_id(client_id, "client_id"))
 
     def create_client(self, **fields) -> dict:
         """Create a client (``POST /v1/clients``). Only ``name`` is required
@@ -561,10 +748,10 @@ class LCSClient:
         return self._create("clients", fields)
 
     def update_client(self, client_id: str, **fields) -> dict:
-        return self._update("clients", client_id, fields)
+        return self._update("clients", _path_id(client_id, "client_id"), fields)
 
     def delete_client(self, client_id: str) -> dict:
-        return self._delete("clients", client_id)
+        return self._delete("clients", _path_id(client_id, "client_id"))
 
     # ═════════════════════════════ Contacts ═════════════════════════════════
 
@@ -573,16 +760,16 @@ class LCSClient:
         return self._list("contacts", page=page, page_size=page_size)
 
     def get_contact(self, contact_id: str) -> dict | None:
-        return self._detail("contacts", contact_id)
+        return self._detail("contacts", _path_id(contact_id, "contact_id"))
 
     def create_contact(self, **fields) -> dict:
         return self._create("contacts", fields)
 
     def update_contact(self, contact_id: str, **fields) -> dict:
-        return self._update("contacts", contact_id, fields)
+        return self._update("contacts", _path_id(contact_id, "contact_id"), fields)
 
     def delete_contact(self, contact_id: str) -> dict:
-        return self._delete("contacts", contact_id)
+        return self._delete("contacts", _path_id(contact_id, "contact_id"))
 
     # ════════════════════════════ Time Entries ══════════════════════════════
 
@@ -603,16 +790,18 @@ class LCSClient:
         )
 
     def get_time_entry(self, time_entry_id: str) -> dict | None:
-        return self._detail("time-entries", time_entry_id)
+        return self._detail("time-entries", _path_id(time_entry_id, "time_entry_id"))
 
     def create_time_entry(self, **fields) -> dict:
         return self._create("time-entries", fields)
 
     def update_time_entry(self, time_entry_id: str, **fields) -> dict:
-        return self._update("time-entries", time_entry_id, fields)
+        return self._update(
+            "time-entries", _path_id(time_entry_id, "time_entry_id"), fields
+        )
 
     def delete_time_entry(self, time_entry_id: str) -> dict:
-        return self._delete("time-entries", time_entry_id)
+        return self._delete("time-entries", _path_id(time_entry_id, "time_entry_id"))
 
     # ═════════════════════════════ Expenses ═════════════════════════════════
     # Note the SINGULAR /v1 path: ``/v1/expense`` (plural ``/v1/expenses`` 404s).
@@ -627,16 +816,16 @@ class LCSClient:
         return self._list("expense", page=page, page_size=page_size)
 
     def get_expense(self, expense_id: str) -> dict | None:
-        return self._detail("expense", expense_id)
+        return self._detail("expense", _path_id(expense_id, "expense_id"))
 
     def create_expense(self, **fields) -> dict:
         return self._create("expense", fields)
 
     def update_expense(self, expense_id: str, **fields) -> dict:
-        return self._update("expense", expense_id, fields)
+        return self._update("expense", _path_id(expense_id, "expense_id"), fields)
 
     def delete_expense(self, expense_id: str) -> dict:
-        return self._delete("expense", expense_id)
+        return self._delete("expense", _path_id(expense_id, "expense_id"))
 
     # ═════════════════════════════ Invoices ═════════════════════════════════
     # Update verb is PATCH (not PUT) for invoices, per the live OPTIONS probe.
@@ -646,19 +835,21 @@ class LCSClient:
         return self._list("invoices", page=page, page_size=page_size)
 
     def get_invoice(self, invoice_id: str) -> dict | None:
-        return self._detail("invoices", invoice_id)
+        return self._detail("invoices", _path_id(invoice_id, "invoice_id"))
 
     def create_invoice(self, **fields) -> dict:
         """Create an invoice (``POST /v1/invoices``). The required body has not been
-        exercised live (the dev firm has no billable items); the caller supplies the
+        exercised against a development account (which had no billable items); the caller supplies the
         fields and the API's 400 validation names any that are missing."""
         return self._create("invoices", fields)
 
     def update_invoice(self, invoice_id: str, **fields) -> dict:
-        return self._update("invoices", invoice_id, fields, method="PATCH")
+        return self._update(
+            "invoices", _path_id(invoice_id, "invoice_id"), fields, method="PATCH"
+        )
 
     def delete_invoice(self, invoice_id: str) -> dict:
-        return self._delete("invoices", invoice_id)
+        return self._delete("invoices", _path_id(invoice_id, "invoice_id"))
 
     def generate_invoice(self, *args, **kwargs) -> dict:
         raise self._not_in_v1(
@@ -706,10 +897,10 @@ class LCSClient:
         ``bank_id`` must come from the Rocket Matter UI.
         """
         if not (matter_id or bank_id):
-            raise RuntimeError(
-                "list_transactions requires matter_id or bank_id — the LCS /v1 "
-                "transactions endpoint has no firm-wide listing, and /v1 exposes no "
-                "bank-enumeration endpoint (get a bankId from the Rocket Matter UI)."
+            logger.warning("list_request_rejected reason=missing_transaction_scope")
+            raise ArgumentValidationError(
+                "matter_id or bank_id",
+                "provided so the transaction list has a matter or bank scope",
             )
         return self._list(
             "transactions",
@@ -720,7 +911,7 @@ class LCSClient:
         )
 
     def get_transaction(self, transaction_id: str) -> dict | None:
-        return self._detail("transactions", transaction_id)
+        return self._detail("transactions", _path_id(transaction_id, "transaction_id"))
 
     def create_transaction(self, **fields) -> dict:
         """Create a bank transaction (``POST /v1/transactions``). Body caller-supplied
@@ -728,10 +919,12 @@ class LCSClient:
         return self._create("transactions", fields)
 
     def update_transaction(self, transaction_id: str, **fields) -> dict:
-        return self._update("transactions", transaction_id, fields)
+        return self._update(
+            "transactions", _path_id(transaction_id, "transaction_id"), fields
+        )
 
     def delete_transaction(self, transaction_id: str) -> dict:
-        return self._delete("transactions", transaction_id)
+        return self._delete("transactions", _path_id(transaction_id, "transaction_id"))
 
     def list_banks(self, *args, **kwargs) -> dict:
         raise self._not_in_v1("list_banks (bank enumeration)")
@@ -772,7 +965,7 @@ class LCSClient:
         return self._list("users", page=page, page_size=page_size)
 
     def get_user(self, user_id: int) -> dict | None:
-        return self._detail("users", user_id)
+        return self._detail("users", _path_id(user_id, "user_id"))
 
     def list_timekeepers(self, *args, **kwargs) -> dict:
         raise self._not_in_v1(
@@ -817,7 +1010,7 @@ class LCSClient:
         return self._list("text-shortcuts", page=page, page_size=page_size)
 
     def get_text_shortcut(self, shortcut_id: int) -> dict | None:
-        return self._detail("text-shortcuts", shortcut_id)
+        return self._detail("text-shortcuts", _path_id(shortcut_id, "shortcut_id"))
 
     # ═══════════════════════════════ Lookups ════════════════════════════════
     # None of the legacy lookup endpoints exist in the LCS /v1 API (all 404).

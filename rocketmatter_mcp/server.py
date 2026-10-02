@@ -2,10 +2,250 @@
 """Rocketmatter MCP server — LCS Integration API tools."""
 
 import json
-from mcp.server.fastmcp import FastMCP
-from rocketmatter_mcp.client import LCSClient
+import logging
+from typing import Annotated, NoReturn
 
-mcp = FastMCP(
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import (
+    ResourceError,
+    ToolError,
+    UnexpectedToolError,
+)
+from mcp.shared.exceptions import MCPError
+from mcp.types import (
+    CallToolResult,
+    InputRequiredResult,
+    TextContent,
+)
+from pydantic import BeforeValidator, Field, ValidationError
+
+from rocketmatter_mcp.client import _VENDOR_REASONS, LCSClient
+from rocketmatter_mcp.errors import (
+    ArgumentValidationError,
+    AuthenticationError,
+    CapabilityUnavailableError,
+    MissingCredentialsError,
+    NotFoundError,
+    TransportError,
+    VendorHTTPError,
+)
+
+_SAFE_HTTP_REASONS = {
+    200: "The vendor reported that the request failed.",
+    400: "The request did not pass vendor validation.",
+    403: "Rocket Matter access denied: the connected account lacks permission for this action (or the authorization expired; re-run rocketmatter-mcp-setup if so).",
+    404: "The requested record was not found.",
+    409: "The request conflicts with the current record state.",
+    422: "The request did not pass vendor validation.",
+    429: "Rate limit reached.",
+}
+_SAFE_ARGUMENT_SHAPES = {
+    ("fields", "a non-empty object"),
+    ("page", "a whole number of at least 1"),
+    (
+        "page_size",
+        "a whole number greater than or equal to 1 and less than or equal to 200",
+    ),
+    (
+        "matter_id or bank_id",
+        "provided so the transaction list has a matter or bank scope",
+    ),
+}
+
+
+class SafeMCPServer(MCPServer):
+    """Return classified, sanitized failures and suppress unsafe SDK logging."""
+
+    async def call_tool(
+        self,
+        name,
+        arguments,
+        context=None,
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except MCPError:
+            raise
+        except Exception as exc:
+            error = _safe_tool_error(exc, self._tool_manager.get_tool(name))
+            if error is None:
+                logger.error("tool_failed reason=unexpected")
+                registered_names = {
+                    tool.name for tool in self._tool_manager.list_tools()
+                }
+                if name in registered_names:
+                    message = f"Error executing tool {name}"
+                else:
+                    message = (
+                        "Unexpected error while executing tool. Check server logs."
+                    )
+            else:
+                logger.info("tool_failed reason=%s", error[0])
+                message = error[1]
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)], is_error=True
+            )
+
+
+def _validation_shape(error_type: str, field: str) -> str:
+    if error_type == "value_error" and field in {"user_id", "shortcut_id"}:
+        return "an integer identifier (not a boolean)"
+    if field == "page":
+        return "a whole number of at least 1"
+    if field == "page_size":
+        return "a whole number greater than or equal to 1 and less than or equal to 200"
+    if error_type in {"int_parsing", "int_type"}:
+        return "a whole number"
+    if error_type in {"string_type", "string_sub_type"}:
+        return "text"
+    if error_type in {"bool_parsing", "bool_type"}:
+        return "true or false"
+    if error_type in {
+        "greater_than_equal",
+        "less_than_equal",
+        "greater_than",
+        "less_than",
+    }:
+        return "a whole number within the documented range"
+    return "a value matching the documented input shape"
+
+
+def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__
+
+    for error in chain:
+        if isinstance(error, MissingCredentialsError):
+            known_names = {
+                "ROCKETMATTER_API_KEY",
+                "ROCKETMATTER_CLIENT_ID",
+                "ROCKETMATTER_CLIENT_SECRET",
+            }
+            if not error.variables or any(
+                name not in known_names for name in error.variables
+            ):
+                return (
+                    "missing_credentials",
+                    "Rocket Matter credentials are missing. Run rocketmatter-mcp-setup, then restart the MCP server.",
+                )
+            names = " and ".join(error.variables)
+            return (
+                "missing_credentials",
+                f"Missing {names}. Run rocketmatter-mcp-setup, then restart the MCP server.",
+            )
+        if isinstance(error, AuthenticationError):
+            return (
+                "authentication_rejected",
+                "Rocket Matter authorization was rejected or expired. Re-authorize with rocketmatter-mcp-setup.",
+            )
+        if isinstance(error, TransportError):
+            if error.unsafe:
+                return (
+                    "transport_failure",
+                    "The operation outcome is unknown because the connection failed. Check whether it completed before retrying.",
+                )
+            return (
+                "transport_failure",
+                "The Rocket Matter read could not complete because of a timeout or connection failure. You may retry.",
+            )
+        if isinstance(error, VendorHTTPError):
+            if error.status == 429:
+                retry_after = error.retry_after
+                if (
+                    isinstance(retry_after, str)
+                    and len(retry_after) <= 5
+                    and retry_after.isascii()
+                    and retry_after.isdecimal()
+                    and 1 <= int(retry_after) <= 86400
+                ):
+                    return (
+                        "rate_limited",
+                        f"HTTP 429: Rate limit reached. Retry after {int(retry_after)} seconds.",
+                    )
+                return (
+                    "rate_limited",
+                    "HTTP 429: Rate limit reached. Wait briefly, then retry.",
+                )
+            status = (
+                error.status
+                if isinstance(error.status, int) and 100 <= error.status <= 599
+                else 500
+            )
+            reason = _SAFE_HTTP_REASONS.get(status, "The vendor rejected the request.")
+            if status != 403 and error.reason in _VENDOR_REASONS.values():
+                reason = error.reason
+            return "vendor_http", f"HTTP {status}: {reason}"
+        if isinstance(error, NotFoundError):
+            return "not_found", "The requested Rocket Matter record was not found."
+        if isinstance(error, ArgumentValidationError):
+            if (error.argument, error.expected) in _SAFE_ARGUMENT_SHAPES or (
+                tool is not None
+                and error.argument in tool.parameters.get("properties", {})
+                and error.expected
+                == "a non-empty plain identifier (ASCII letters, digits, -, _, ., ~); not . or .."
+            ):
+                return (
+                    "argument_validation",
+                    f"Invalid argument {error.argument}: expected {error.expected}.",
+                )
+            return (
+                "argument_validation",
+                "Invalid argument: expected a value matching the documented input shape.",
+            )
+        if isinstance(error, CapabilityUnavailableError):
+            return (
+                "capability_unavailable",
+                "This capability is not available in the Rocket Matter LCS /v1 API.",
+            )
+
+    # Only SDK input validation is a caller error. Pydantic failures inside a
+    # tool body are unexpected and must not expose vendor data or field keys.
+    if (
+        isinstance(exc, ToolError)
+        and not isinstance(exc, UnexpectedToolError)
+        and isinstance(exc.__cause__, ValidationError)
+        and tool is not None
+    ):
+        fields: list[tuple[str, str]] = []
+        properties = tool.parameters.get("properties", {})
+        for item in exc.__cause__.errors(include_input=False, include_url=False):
+            field = (item.get("loc") or ("argument",))[0]
+            if not isinstance(field, str) or field not in properties:
+                field, shape = (
+                    "unexpected argument",
+                    "an argument documented by the tool",
+                )
+            else:
+                error_type = str(item.get("type", ""))
+                if error_type == "missing":
+                    shape = "a required " + properties[field].get(
+                        "type", "value matching the tool schema"
+                    )
+                else:
+                    shape = _validation_shape(error_type, field)
+            if (field, shape) not in fields:
+                fields.append((field, shape))
+        if fields:
+            text = "; ".join(f"{field} must be {shape}" for field, shape in fields)
+            return "argument_validation", f"Invalid arguments: {text}."
+    # The only tool-authored ToolErrors currently describe fields_json syntax.
+    # Keep their messages explicit and value-free, even if the SDK wraps them.
+    fixed_tool_errors = {
+        "Invalid fields_json: malformed JSON",
+        "fields_json must be a JSON object",
+    }
+    for error in chain:
+        if isinstance(error, ToolError) and not isinstance(error, UnexpectedToolError):
+            message = str(error)
+            if message in fixed_tool_errors:
+                return "argument_validation", message
+    return None
+
+
+mcp = SafeMCPServer(
     "rocketmatter",
     instructions=(
         "Rocketmatter legal practice management via the ProfitSolv LCS /v1 Integration "
@@ -19,12 +259,33 @@ mcp = FastMCP(
     ),
 )
 
-# Tools call the client directly and let exceptions propagate: FastMCP wraps a
-# raised exception into a CallToolResult with ``isError=True`` (the message in the
-# content), which is the correct MCP error contract. An earlier wrapper that caught
-# exceptions and returned ``{"error": ...}`` as a NORMAL result hid failures behind
+# MCPServer reports ToolError and unexpected exceptions as isError results. An
+# earlier wrapper returned ``{"error": ...}`` as a normal result and hid failures behind
 # ``isError=False`` — a write that applied but whose response errored looked failed,
 # risking a retry/duplicate. Failing loud via ``isError`` is both correct and safe.
+
+logger = logging.getLogger(__name__)
+
+
+def _reject_boolean_path_id(value):
+    """Reject booleans before integer coercion; preserve all other SDK inputs."""
+    if isinstance(value, bool):
+        raise ValueError("Use an integer identifier, not a boolean.")
+    return value
+
+
+# A before-validator preserves the existing integer JSON schema and coercions.
+PathId = Annotated[int, BeforeValidator(_reject_boolean_path_id)]
+
+Page = Annotated[int, Field(ge=1, description="One-based vendor API page number.")]
+PageSize = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=200,
+        description="Maximum number of records returned from the requested page.",
+    ),
+]
 
 
 def _c():
@@ -37,9 +298,11 @@ def _fields(fields_json: str | None) -> dict:
     try:
         fields = json.loads(fields_json)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid fields_json: {e}") from e
+        logger.warning("tool_input_rejected reason=fields_json_invalid_json")
+        raise ToolError("Invalid fields_json: malformed JSON") from e
     if not isinstance(fields, dict):
-        raise ValueError("fields_json must be a JSON object")
+        logger.warning("tool_input_rejected reason=fields_json_not_object")
+        raise ToolError("fields_json must be a JSON object")
     return fields
 
 
@@ -48,8 +311,8 @@ def _fields(fields_json: str | None) -> dict:
 
 @mcp.tool()
 def list_matters(
-    page: int = 1,
-    page_size: int = 25,
+    page: Page = 1,
+    page_size: PageSize = 25,
     client_id: str | None = None,
     matter_name: str | None = None,
 ) -> str:
@@ -97,8 +360,8 @@ def delete_matter(matter_id: str) -> str:
 
 @mcp.tool()
 def list_clients(
-    page: int = 1,
-    page_size: int = 25,
+    page: Page = 1,
+    page_size: PageSize = 25,
     name: str | None = None,
     display_name: str | None = None,
 ) -> str:
@@ -145,7 +408,7 @@ def delete_client(client_id: str) -> str:
 
 
 @mcp.tool()
-def list_contacts(page: int = 1, page_size: int = 25) -> str:
+def list_contacts(page: Page = 1, page_size: PageSize = 25) -> str:
     """List contacts with pagination."""
     return json.dumps(_c().list_contacts(page=page, page_size=page_size), indent=2)
 
@@ -180,8 +443,8 @@ def delete_contact(contact_id: str) -> str:
 @mcp.tool()
 def list_time_entries(
     matter_id: str | None = None,
-    page: int = 1,
-    page_size: int = 25,
+    page: Page = 1,
+    page_size: PageSize = 25,
 ) -> str:
     """List time entries, paginated. Optional matter_id (GUID) filter — the only
     server-side filter the /v1 API honors for time entries."""
@@ -225,7 +488,7 @@ def delete_time_entry(time_entry_id: str) -> str:
 
 
 @mcp.tool()
-def list_expenses(page: int = 1, page_size: int = 25) -> str:
+def list_expenses(page: Page = 1, page_size: PageSize = 25) -> str:
     """List expense cards, paginated (firm-wide). The /v1 API honors no server-side
     filter on expenses — not even matter_id — so none is offered."""
     return json.dumps(
@@ -262,7 +525,7 @@ def delete_expense(expense_id: str) -> str:
 
 
 @mcp.tool()
-def list_invoices(page: int = 1, page_size: int = 25) -> str:
+def list_invoices(page: Page = 1, page_size: PageSize = 25) -> str:
     """List invoices with pagination."""
     return json.dumps(_c().list_invoices(page=page, page_size=page_size), indent=2)
 
@@ -331,7 +594,7 @@ def approve_invoice(invoice_id: str, invoice_number: str) -> str:
 
 
 @mcp.tool()
-def list_payments(page: int = 1, page_size: int = 25) -> str:
+def list_payments(page: Page = 1, page_size: PageSize = 25) -> str:
     """List invoice payments with pagination."""
     return json.dumps(_c().list_payments(page=page, page_size=page_size), indent=2)
 
@@ -356,8 +619,8 @@ def get_invoice_allocations(fields_json: str | None = None) -> str:
 def list_transactions(
     matter_id: str | None = None,
     bank_id: str | None = None,
-    page: int = 1,
-    page_size: int = 25,
+    page: Page = 1,
+    page_size: PageSize = 25,
 ) -> str:
     """List bank transactions for a matter or bank.
 
@@ -421,7 +684,7 @@ def delete_transaction(transaction_id: str) -> str:
 
 
 @mcp.tool()
-def list_documents(page: int = 1, page_size: int = 25) -> str:
+def list_documents(page: Page = 1, page_size: PageSize = 25) -> str:
     """List documents, paginated (firm-wide, read-only). The /v1 API exposes no
     confirmed server-side filter for documents, so none is offered."""
     return json.dumps(_c().list_documents(page=page, page_size=page_size), indent=2)
@@ -459,21 +722,21 @@ def delete_document(path: str, doc_id: str) -> str:
 
 
 @mcp.tool()
-def list_users(page: int = 1, page_size: int = 25) -> str:
+def list_users(page: Page = 1, page_size: PageSize = 25) -> str:
     """List firm users (a.k.a. timekeepers) with pagination. Each carries email,
     roles, default rate, and status."""
     return json.dumps(_c().list_users(page=page, page_size=page_size), indent=2)
 
 
 @mcp.tool()
-def get_user(user_id: int) -> str:
+def get_user(user_id: PathId) -> str:
     """Get a firm user by numeric ID."""
     return json.dumps(_c().get_user(user_id), indent=2)
 
 
 @mcp.tool()
 def list_timekeepers(
-    page: int = 1, page_size: int = 25, active_only: bool | None = None
+    page: Page = 1, page_size: PageSize = 25, active_only: bool | None = None
 ) -> str:
     """[Not in LCS /v1] Per-timekeeper billable/non-billable time summary is not in
     /v1; fails loudly. Use list_users for the firm's people list."""
@@ -497,7 +760,7 @@ def get_firm_summary() -> str:
 
 
 @mcp.tool()
-def list_text_shortcuts(page: int = 1, page_size: int = 25) -> str:
+def list_text_shortcuts(page: Page = 1, page_size: PageSize = 25) -> str:
     """List text shortcuts/shorthands. The /v1 endpoint exists but the current OAuth
     app/user may not be authorized (returns a 403 until the scope is granted)."""
     return json.dumps(
@@ -506,7 +769,7 @@ def list_text_shortcuts(page: int = 1, page_size: int = 25) -> str:
 
 
 @mcp.tool()
-def get_text_shortcut(shortcut_id: int) -> str:
+def get_text_shortcut(shortcut_id: PathId) -> str:
     """Get a text shortcut by ID (subject to the same /v1 authorization as
     list_text_shortcuts)."""
     return json.dumps(_c().get_text_shortcut(shortcut_id), indent=2)
@@ -538,7 +801,7 @@ def get_activity_codes(matter_id: str) -> str:
 
 # ── Lookups [Not in LCS /v1] ─────────────────────────────────────────────────────
 # None of the legacy lookup endpoints exist in the LCS /v1 API; every tool below
-# fails loudly. Kept registered for Toby's keep/drop call (see COVERAGE_DELTA).
+# fails loudly. Kept registered to report unavailable capabilities (see COVERAGE_DELTA).
 
 
 @mcp.tool()
@@ -645,11 +908,11 @@ def get_hard_cost_expense_lookups(matter_id: str | None = None) -> str:
 
 # ── Accounts Payable [Not in LCS /v1] ────────────────────────────────────────────
 # No AP endpoints exist in the LCS /v1 API; every tool below fails loudly. Kept
-# registered for Toby's keep/drop call (see COVERAGE_DELTA).
+# registered to report unavailable capabilities (see COVERAGE_DELTA).
 
 
 @mcp.tool()
-def list_ap_bills(page: int = 1, page_size: int = 25) -> str:
+def list_ap_bills(page: Page = 1, page_size: PageSize = 25) -> str:
     """[Not in LCS /v1] List AP bills. Fails loudly."""
     return json.dumps(_c().list_ap_bills(page=page, page_size=page_size), indent=2)
 
@@ -679,7 +942,7 @@ def delete_ap_bill(bill_id: str) -> str:
 
 
 @mcp.tool()
-def list_ap_payments(page: int = 1, page_size: int = 25) -> str:
+def list_ap_payments(page: Page = 1, page_size: PageSize = 25) -> str:
     """[Not in LCS /v1] List AP payments. Fails loudly."""
     return json.dumps(_c().list_ap_payments(page=page, page_size=page_size), indent=2)
 
@@ -697,7 +960,7 @@ def get_ap_payment_status(fields_json: str | None = None) -> str:
 
 
 @mcp.tool()
-def list_ap_vendors(page: int = 1, page_size: int = 25) -> str:
+def list_ap_vendors(page: Page = 1, page_size: PageSize = 25) -> str:
     """[Not in LCS /v1] List AP vendors. Fails loudly."""
     return json.dumps(_c().list_ap_vendors(page=page, page_size=page_size), indent=2)
 
@@ -728,13 +991,26 @@ def update_ap_vendor(vendor_id: str, fields_json: str) -> str:
 @mcp.resource("rocketmatter://users", mime_type="application/json")
 def users_resource() -> str:
     """All firm users / timekeepers (email, roles, default rate, status)."""
-    return json.dumps(_c().list_users(page=1, page_size=100), indent=2)
+    try:
+        return json.dumps(_c().list_users(page=1, page_size=100), indent=2)
+    except Exception as exc:  # noqa: BLE001
+        _raise_safe_resource_error(exc)
 
 
 @mcp.resource("rocketmatter://clients", mime_type="application/json")
 def clients_resource() -> str:
     """The firm's clients (first page) — names, balances, and contact details."""
-    return json.dumps(_c().list_clients(page=1, page_size=100), indent=2)
+    try:
+        return json.dumps(_c().list_clients(page=1, page_size=100), indent=2)
+    except Exception as exc:  # noqa: BLE001
+        _raise_safe_resource_error(exc)
+
+
+def _raise_safe_resource_error(exc: Exception) -> NoReturn:
+    safe = _safe_tool_error(exc)
+    logger.warning("resource_read_failed reason=%s", safe[0] if safe else "unexpected")
+    message = safe[1] if safe else "Unable to read this Rocket Matter resource."
+    raise ResourceError(message) from None
 
 
 @mcp.resource("rocketmatter://security-notes", mime_type="text/markdown")
@@ -767,7 +1043,7 @@ def security_notes_resource() -> str:
       create_expense, update_expense, delete_expense, create_invoice, update_invoice,
       delete_invoice, create_payment, create_transaction, update_transaction,
       delete_transaction.
-    - **Not in LCS /v1 (fail loud — kept for keep/drop review):** get_firm_summary,
+    - **Not in LCS /v1:** get_firm_summary,
       list_timekeepers, list_banks, list_chart_of_accounts, generate_invoice,
       list_billable_items, approve_invoice, get_invoice_allocations, the document
       actions, get_task_codes/get_activity_codes, all 17 lookups, all Accounts

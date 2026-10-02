@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocketmatter-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "MCP server for Rocketmatter — ProfitSolv LCS /v1 Integration API (scoped OAuth)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,8 +25,8 @@ dev = [
 
 [project.scripts]
 rocketmatter-mcp = "rocketmatter_mcp.server:main"
-rocketmatter-mcp-setup = "rocketmatter_mcp.setup.oauth_flow:main"
-rocketmatter-mcp-verify = "rocketmatter_mcp.setup.verify:main"
+rocketmatter-mcp-setup = "rocketmatter_mcp.cli:setup_main"
+rocketmatter-mcp-verify = "rocketmatter_mcp.cli:verify_main"
 
 [project.urls]
 Homepage = "https://github.com/RosenAdvertising/rocketmatter-mcp"

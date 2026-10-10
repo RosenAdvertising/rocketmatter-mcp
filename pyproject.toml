@@ -5,11 +5,22 @@ build-backend = "hatchling.build"
 [project]
 name = "rocketmatter-mcp"
 version = "0.5.0"
-description = "MCP server for Rocketmatter — ProfitSolv LCS /v1 Integration API (scoped OAuth)"
+description = "MCP server for Rocket Matter: matters, clients, time, invoices and payments."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["rocketmatter", "mcp", "legal", "law", "claude", "practice-management"]
+classifiers = [
+    "Intended Audience :: Legal Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "mcp>=2.3,<3",
     "requests>=2.34.2",
@@ -30,6 +41,7 @@ rocketmatter-mcp-verify = "rocketmatter_mcp.cli:verify_main"
 
 [project.urls]
 Homepage = "https://github.com/RosenAdvertising/rocketmatter-mcp"
+Repository = "https://github.com/RosenAdvertising/rocketmatter-mcp"
 Issues = "https://github.com/RosenAdvertising/rocketmatter-mcp/issues"
 
 [tool.hatch.build.targets.wheel]

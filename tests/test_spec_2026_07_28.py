@@ -1,4 +1,4 @@
-"""Offline protocol and fleet-canary regressions for MCP 2026-07-28."""
+"""Offline protocol and pre-release canary regressions for MCP 2026-07-28."""
 
 from __future__ import annotations
 

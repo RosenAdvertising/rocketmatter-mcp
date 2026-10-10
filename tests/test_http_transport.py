@@ -222,7 +222,7 @@ def test_default_transport_keeps_stdio_run(monkeypatch):
     run.assert_called_once_with()
 
 
-@pytest.mark.parametrize("value", ["stdio", " STDIO ", " "])
+@pytest.mark.parametrize("value", ["stdio", " STDIO ", " ", ""])
 def test_transport_normalization(value, monkeypatch):
     monkeypatch.setenv("ROCKETMATTER_MCP_TRANSPORT", value)
     assert server._requested_transport() == "stdio"
@@ -234,6 +234,80 @@ def test_unknown_transport_exits(monkeypatch):
         SystemExit, match="ROCKETMATTER_MCP_TRANSPORT.*stdio.*streamable-http"
     ):
         server.main()
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_host_defaults_to_loopback(value, monkeypatch):
+    monkeypatch.setenv("ROCKETMATTER_MCP_HOST", value)
+    assert server._host() == "127.0.0.1"
+
+
+def test_uppercase_localhost_is_not_loopback(monkeypatch):
+    monkeypatch.setenv("ROCKETMATTER_MCP_HOST", "LOCALHOST")
+    assert server._host() == "LOCALHOST"
+    with pytest.raises(SystemExit, match="ROCKETMATTER_MCP_ALLOWED_HOSTS"):
+        server.create_serve_app()
+
+
+def test_server_import_without_installed_distribution(monkeypatch):
+    import importlib
+    import importlib.metadata
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    reloaded = importlib.reload(server)
+    assert reloaded._SERVER_VERSION == "0.0.0+local"
+    monkeypatch.undo()
+    importlib.reload(server)
+
+
+def test_concurrent_refresh_calls_vendor_once(monkeypatch):
+    import threading
+
+    store = {
+        "access_token": "stale-token",
+        "refresh_token": "static-refresh-token",
+        "expires_at": 0.0,
+    }
+    store_lock = threading.Lock()
+    vendor_calls = []
+
+    def fake_load():
+        with store_lock:
+            return dict(store)
+
+    def fake_save(tokens):
+        with store_lock:
+            store.update(tokens)
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+
+        def json(self):
+            return {"access_token": "fresh-token", "expires_in": 17999}
+
+    def fake_post(*args, **kwargs):
+        vendor_calls.append(1)
+        time.sleep(0.2)
+        return FakeResponse()
+
+    monkeypatch.setattr(client_module, "_load_tokens", fake_load)
+    monkeypatch.setattr(client_module, "_save_tokens", fake_save)
+    monkeypatch.setattr(client_module.requests, "post", fake_post)
+
+    first = client_module.LCSClient()
+    second = client_module.LCSClient()
+    threads = [threading.Thread(target=client.refresh) for client in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(vendor_calls) == 1
+    assert first._tokens["access_token"] == "fresh-token"
+    assert second._tokens["access_token"] == "fresh-token"
 
 
 def test_http_dispatch_runs_uvicorn_with_sse_default(monkeypatch):

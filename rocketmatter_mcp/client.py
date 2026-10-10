@@ -47,6 +47,7 @@ import re
 import secrets
 import time
 from pathlib import Path
+from threading import Lock
 from urllib.parse import quote, urlencode
 
 import requests
@@ -109,6 +110,13 @@ TOKEN_FILE = CONFIG_DIR / "tokens.json"
 
 # Access tokens live ~5h (expires_in 17999); refresh this many seconds early.
 _EXPIRY_SKEW = 90
+
+# Serialises OAuth refreshes across concurrent HTTP requests: each request builds
+# its own LCSClient, so without this two threads with the same stale snapshot
+# would each POST a refresh. The holder re-reads the token file inside the lock
+# so the second caller reuses the first caller's saved tokens instead of
+# refreshing again.
+_TOKEN_REFRESH_LOCK = Lock()
 
 # Per-request timeout (seconds) for data calls — a stalled /v1 call must not hang
 # the MCP tool indefinitely.
@@ -366,6 +374,23 @@ class LCSClient:
             time.time() < self._tokens.get("expires_at", 0) - _EXPIRY_SKEW
         )
 
+    def refresh(self) -> None:
+        """Refresh the access token, serialised across concurrent HTTP requests.
+
+        Re-reads the cached tokens inside the lock: a second caller whose snapshot
+        went stale reuses the first caller's newly saved tokens instead of POSTing
+        a second refresh.
+        """
+        with _TOKEN_REFRESH_LOCK:
+            try:
+                latest = _load_tokens()
+            except (OSError, ValueError):
+                latest = {}
+            if latest != self._tokens and latest.get("access_token"):
+                self._tokens = latest
+                return
+            self._refresh()
+
     def _refresh(self) -> None:
         """Get a fresh access token via the long-lived refresh token (no password)."""
         refresh_token = self._tokens.get("refresh_token")
@@ -427,7 +452,7 @@ class LCSClient:
         raw ``Response`` so callers can treat 404 specially (see :meth:`_detail`).
         """
         if not self._token_valid():
-            self._refresh()
+            self.refresh()
         url = self._url(path)
         try:
             resp = self.session.request(
@@ -442,7 +467,7 @@ class LCSClient:
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise TransportError(method) from exc
         if resp.status_code == 401:
-            self._refresh()
+            self.refresh()
             try:
                 resp = self.session.request(
                     method,

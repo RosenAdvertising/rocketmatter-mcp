@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import os
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, NoReturn
 
 from mcp.server import MCPServer
@@ -250,10 +250,19 @@ def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
     return None
 
 
+try:
+    _SERVER_VERSION = version("rocketmatter-mcp")
+except PackageNotFoundError:
+    try:
+        from rocketmatter_mcp import __version__ as _SERVER_VERSION
+    except ImportError:
+        _SERVER_VERSION = "0.0.0+local"
+
+
 mcp = SafeMCPServer(
     name="rocketmatter",
     title="Rocket Matter MCP",
-    version=version("rocketmatter-mcp"),
+    version=_SERVER_VERSION,
     instructions=(
         "Rocketmatter legal practice management via the ProfitSolv LCS /v1 Integration "
         "API (scoped OAuth — no password login, so it never logs you out of Rocket "

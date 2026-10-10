@@ -39,7 +39,7 @@ court rules.
 ## Requirements
 
 - Python 3.10+
-- Python MCP SDK >=2.2,<3 (protocol revision 2026-07-28)
+- Python MCP SDK >=2.3,<3 (protocol revision 2026-07-28)
 - Claude Desktop (or any MCP-compatible client)
 - A Rocket Matter account **and** a registered OAuth integration (API key + OAuth
   client ID/secret) for the ProfitSolv LCS Integration API
@@ -96,6 +96,41 @@ rocketmatter-mcp-verify
   }
 }
 ```
+
+## HTTP mode
+
+Stdio is the default. Set `ROCKETMATTER_MCP_TRANSPORT=streamable-http` to serve
+stateless Streamable HTTP at `/mcp`. The SDK supports both protocol 2026-07-28
+single-request calls and earlier clients on this endpoint. SSE stays enabled so
+disconnecting a client cancels its request.
+
+| Environment variable | Default / purpose |
+| --- | --- |
+| `ROCKETMATTER_MCP_TRANSPORT` | `stdio`; choose `streamable-http` for HTTP. |
+| `ROCKETMATTER_MCP_HOST` | `127.0.0.1`; address to bind. |
+| `PORT` | `8080`; integer listening port. |
+| `ROCKETMATTER_MCP_ALLOWED_HOSTS` | Comma-separated Host values, required outside `127.0.0.1`, `localhost`, and `::1`. Include the port, e.g. `mcp.example:8080`, or allow any port with `mcp.example:*`. |
+| `ROCKETMATTER_MCP_ALLOWED_ORIGINS` | Optional comma-separated browser origins, e.g. `https://client.example`. Outside loopback, an omitted list rejects every supplied Origin; requests without Origin remain allowed. The SDK validates loopback Hosts and Origins automatically. |
+| `ROCKETMATTER_API_KEY` | Existing integration API key (`X-Api-Key`). |
+| `ROCKETMATTER_CLIENT_ID` | Existing OAuth client ID, used for token refresh. |
+| `ROCKETMATTER_CLIENT_SECRET` | Existing OAuth client secret, used for token refresh. |
+| `ROCKETMATTER_BASE_URL` | `https://app.rocketmatter.net`; approved OAuth host. |
+| `ROCKETMATTER_API_BASE_URL` | Existing approved ProfitSolv LCS data host; see Endpoint configuration below. |
+| `ROCKETMATTER_REDIRECT_URI` | `http://127.0.0.1:8771/callback`; existing setup callback. |
+| `ROCKETMATTER_MCP_USE_KEYRING` | `1`; set `0` to disable OS keyring storage. |
+
+HTTP uses the same credential resolution and cached OAuth tokens from
+`rocketmatter-mcp-setup` as stdio. Vendor credentials come from the server's
+environment or existing credential store, never from HTTP requests.
+
+After the existing setup:
+
+```bash
+ROCKETMATTER_MCP_TRANSPORT=streamable-http \
+ROCKETMATTER_MCP_HOST=127.0.0.1 PORT=8080 rocketmatter-mcp
+```
+
+The endpoint is `http://127.0.0.1:8080/mcp`.
 
 ## Credential storage
 

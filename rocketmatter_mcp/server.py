@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Rocketmatter MCP server — LCS Integration API tools."""
 
+import asyncio
 import json
 import logging
+import os
+from importlib.metadata import version
 from typing import Annotated, NoReturn
 
 from mcp.server import MCPServer
@@ -11,6 +14,7 @@ from mcp.server.mcpserver.exceptions import (
     ToolError,
     UnexpectedToolError,
 )
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolResult,
@@ -18,6 +22,7 @@ from mcp.types import (
     TextContent,
 )
 from pydantic import BeforeValidator, Field, ValidationError
+from starlette.applications import Starlette
 
 from rocketmatter_mcp.client import _VENDOR_REASONS, LCSClient
 from rocketmatter_mcp.errors import (
@@ -246,7 +251,9 @@ def _safe_tool_error(exc: Exception, tool=None) -> tuple[str, str] | None:
 
 
 mcp = SafeMCPServer(
-    "rocketmatter",
+    name="rocketmatter",
+    title="Rocket Matter MCP",
+    version=version("rocketmatter-mcp"),
     instructions=(
         "Rocketmatter legal practice management via the ProfitSolv LCS /v1 Integration "
         "API (scoped OAuth — no password login, so it never logs you out of Rocket "
@@ -1105,8 +1112,87 @@ def accounts_receivable_review() -> str:
    (Note: Accounts Payable and firm-summary tools are not available in the LCS /v1 API.)"""
 
 
+STREAMABLE_HTTP_TRANSPORT = "streamable-http"
+
+
+def _requested_transport() -> str:
+    return (
+        os.environ.get("ROCKETMATTER_MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
+    )
+
+
+def _host() -> str:
+    return os.environ.get("ROCKETMATTER_MCP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def _port() -> int:
+    raw = os.environ.get("PORT", "8080").strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"PORT must be an integer, got {raw!r}") from exc
+
+
+def _transport_security() -> TransportSecuritySettings | None:
+    if _host() in ("127.0.0.1", "localhost", "::1"):
+        return None
+    allowed_hosts = [
+        value.strip()
+        for value in os.environ.get("ROCKETMATTER_MCP_ALLOWED_HOSTS", "").split(",")
+        if value.strip()
+    ]
+    if not allowed_hosts:
+        raise SystemExit(
+            "ROCKETMATTER_MCP_ALLOWED_HOSTS is required when "
+            "ROCKETMATTER_MCP_HOST is not 127.0.0.1, localhost, or ::1."
+        )
+    allowed_origins = [
+        value.strip()
+        for value in os.environ.get("ROCKETMATTER_MCP_ALLOWED_ORIGINS", "").split(",")
+        if value.strip()
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def create_serve_app() -> Starlette:
+    """Build the stateless HTTP app with the SDK's default SSE response mode."""
+    return mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        host=_host(),
+        stateless_http=True,
+        transport_security=_transport_security(),
+    )
+
+
+async def _serve_streamable_http() -> None:
+    import uvicorn
+
+    config = uvicorn.Config(
+        create_serve_app(),
+        host=_host(),
+        port=_port(),
+        log_level=mcp.settings.log_level.lower(),
+        access_log=False,
+    )
+    await uvicorn.Server(config).serve()
+
+
 def main():
-    mcp.run()
+    transport = _requested_transport()
+    if transport == "stdio":
+        mcp.run()
+        return
+    if transport == STREAMABLE_HTTP_TRANSPORT:
+        asyncio.run(_serve_streamable_http())
+        return
+    raise SystemExit(
+        "Unsupported ROCKETMATTER_MCP_TRANSPORT "
+        f"{transport!r}; expected 'stdio' or '{STREAMABLE_HTTP_TRANSPORT}'."
+    )
 
 
 if __name__ == "__main__":
